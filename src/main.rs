@@ -5,6 +5,7 @@ use machineglass::{
     config::{self, Config},
     engine::Engine,
     model::*,
+    tray::{self, Tray},
 };
 use std::{path::PathBuf, time::Duration};
 
@@ -28,6 +29,7 @@ enum Sort {
 
 struct MachineGlass {
     engine: Engine,
+    tray: Option<Tray>,
     config: Config,
     page: Page,
     query: String,
@@ -78,8 +80,16 @@ impl MachineGlass {
         });
         let config = Config::load();
         config::log("Starting MachineGlass 0.1.0; direct Win32 provider");
+        let tray = Tray::new(&cc.egui_ctx)
+            .map_err(|e| {
+                config::log(&format!(
+                    "Tray unavailable; closing window exits normally: {e}"
+                ))
+            })
+            .ok();
         Self {
             engine: Engine::start(config.clone(), cc.egui_ctx.clone()),
+            tray,
             config,
             page,
             query,
@@ -468,6 +478,13 @@ fn chart(ui: &mut egui::Ui, history: &[HistoryPoint], cpu: bool, color: Color32,
 
 impl eframe::App for MachineGlass {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.tray.as_ref().is_some_and(|tray| !tray.quitting())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            config::log("Window closed to tray; collection continues");
+        }
         let (latest, history, age, error) = {
             let state = self.engine.state.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -553,6 +570,9 @@ impl eframe::App for MachineGlass {
                 }
                 if let Some(e) = &error {
                     ui.colored_label(Color32::YELLOW, e);
+                }
+                if self.tray.is_none() {
+                    ui.colored_label(Color32::YELLOW, "Tray unavailable · closing exits");
                 }
             });
         });
@@ -643,6 +663,7 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MachineGlass")
+            .with_icon(tray::window_icon())
             .with_inner_size([1180.0, 800.0])
             .with_min_inner_size([1040.0, 720.0]),
         renderer: eframe::Renderer::Glow,

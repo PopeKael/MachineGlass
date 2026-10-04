@@ -11,6 +11,16 @@ the **Milestone 1 technical skeleton**, not the full product described in the
 Open `dist\MachineGlass\MachineGlass.exe`. The release uses a native desktop
 window and a statically linked C runtime. No browser, Node, Python, Docker,
 monitoring suite, administrator prompt or development server is required.
+The teal stethoscope appears in the Windows notification area, title bar,
+taskbar and executable icon. Windows may place a new tray icon under the
+notification-area overflow arrow.
+
+**Closing the window hides it to the tray; monitoring and history continue.**
+Click the tray icon to restore the window. Right-click for **Show MachineGlass**,
+**Hide to tray** and **Quit MachineGlass**. Quit shuts down collection and removes
+the icon. If tray creation fails, a status warning appears and closing the window
+exits normally, rather than leaving an inaccessible background process.
+
 The current renderer requires a working OpenGL 3.3 graphics driver; renderer
 failure is logged. Compatibility with older / remote-session GPUs is still a
 proof-of-concept question.

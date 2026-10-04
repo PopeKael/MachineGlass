@@ -1,0 +1,36 @@
+[
+  {
+    "Directory": "egui",
+    "Commit": "44cdd653e2317d300fb8a6c9c36b03f23991e803",
+    "Repository": "emilk/egui",
+    "Files": [
+      "LICENSE-MIT",
+      "LICENSE-APACHE"
+    ]
+  },
+  {
+    "Directory": "clipboard-win",
+    "Commit": "3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342",
+    "Repository": "DoumanAsh/clipboard-win",
+    "Files": [
+      "LICENSE"
+    ]
+  },
+  {
+    "Directory": "gl-rs",
+    "Commit": "ea503e8d5fb6d73c6030e6191ce738cd3bf3433e",
+    "Repository": "brendanzab/gl-rs",
+    "Files": [
+      "LICENSE"
+    ]
+  },
+  {
+    "Directory": "profiling",
+    "Commit": "8271551172eb6fa4cba47369aedd93790c623df9",
+    "Repository": "aclysma/profiling",
+    "Files": [
+      "LICENSE-MIT",
+      "LICENSE-APACHE"
+    ]
+  }
+]

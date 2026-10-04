@@ -58,8 +58,9 @@ process and acquisition timing.
 
 The portable package contains the executable, documentation, an inventory of
 126 resolved Windows dependency packages (including build dependencies), and
-provided licence / font notice files. No standalone licence text was missing
-from that inventory. The registry lockfile includes additional-platform packages
+provided licence / font notice files. A later package audit found omitted
+upstream licence texts in several registry archives; the tray increment below
+fixes their inclusion. The registry lockfile includes additional-platform packages
 that are not part of the resolved Windows graph.
 
 GPU / VRAM, temperatures, storage, network, services, process trees, historical
@@ -73,3 +74,25 @@ hands-on acceptance beyond the rendered filtered-list check.
 Local raw probe output, comparisons and native framebuffer captures are under
 `verification/` and excluded from Git. The source is a separate local Git
 checkpoint; it has not been pushed to a remote.
+
+## Stethoscope icon and system tray increment
+
+- Original teal / blue stethoscope artwork added as SVG, PNG, raw RGBA and a
+  multi-resolution Windows ICO (16, 32, 48, 64, 128 and 256 pixels).
+- The icon is embedded in the executable and used by the native window and tray.
+- Native screenshot inspection confirmed the window icon and live dashboard.
+  The runtime log confirmed successful native tray registration.
+- All four existing collector/history tests pass, Clippy passes with warnings
+  denied, and the release build succeeds with the icon resource required.
+- Show / Hide / Quit and close-to-tray paths are implemented. Interactive tray
+  menu and close/restore/quit verification remains incomplete: the Computer Use
+  helper detected active user input and blocked the attempted close action.
+  No user shell restart was performed to test Explorer recovery.
+- The new release is installed in the existing portable package and running.
+  These observations do not supersede the earlier overhead measurements; the
+  tray build has not yet received a separate overhead benchmark.
+- The package audit found several crate archives without their standalone
+  licence texts. Notices were retrieved from the exact commits recorded in
+  those crates, stored locally with provenance, and added as packaging fallbacks.
+  Packaging now rejects unrecognized missing notices instead of silently
+  leaving an incomplete redistribution bundle.
