@@ -61,20 +61,34 @@ pub fn data_dir() -> PathBuf {
 /// Small, bounded internal log; no inventory, executable paths or usage data.
 pub fn log(message: &str) {
     use std::io::Write;
-    let dir = data_dir();
-    if fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    let path = dir.join("machineglass.log");
-    if fs::metadata(&path).is_ok_and(|m| m.len() > 1_048_576) {
-        let _ = fs::rename(&path, dir.join("machineglass.previous.log"));
-    }
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+    let append = |path: &std::path::Path, message: &str| -> std::io::Result<()> {
+        let dir = path.parent().expect("Log path has a parent");
+        if !dir.is_dir() {
+            fs::create_dir_all(dir)?;
+        }
+        if fs::metadata(path).is_ok_and(|m| m.len() > 1_048_576) {
+            fs::rename(path, path.with_extension("previous.log"))?;
+        }
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        let _ = writeln!(f, "{stamp} pid={} {message}", std::process::id());
+        writeln!(f, "{stamp} pid={} {message}", std::process::id())
+    };
+    if let Err(error) = append(&data_dir().join("machineglass.log"), message) {
+        // A shortcut launch must remain diagnosable if the primary directory
+        // or file cannot be written. Unique per-process fallback avoids locks
+        // and permission inheritance from the primary log.
+        let fallback =
+            std::env::temp_dir().join(format!("MachineGlass-{}.log", std::process::id()));
+        let _ = append(
+            &fallback,
+            &format!("Primary log failed: {error}; {message}"),
+        );
     }
 }
 

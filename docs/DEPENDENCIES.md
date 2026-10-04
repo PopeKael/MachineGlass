@@ -6,6 +6,7 @@ Direct dependencies:
 |---|---|---|---|
 | eframe / egui 0.33.3 | Native window, OpenGL rendering and widgets | MIT OR Apache-2.0 | Compiled into executable; no browser runtime. Uses OS graphics driver. Framework remains provisional. |
 | windows-sys 0.61.2 | Typed Win32 imports | MIT OR Apache-2.0 | Windows system DLLs; no installed monitoring library. |
+| raw-window-handle 0.6.2 | Borrow eframe's native HWND for tray restore | MIT OR Apache-2.0 OR Zlib | Already in the resolved graph; no new runtime. The handle remains owned by eframe. |
 | serde / serde_json | Configuration and probe serialization | MIT OR Apache-2.0 | Compiled into executable. No network client. |
 | tray-icon 0.26.0 / muda 0.21.0 | Native Windows tray icon and context menu | MIT OR Apache-2.0 | Compiled into executable; existing Windows message loop. Default non-Windows features disabled. |
 | embed-resource 3.0.11 | Compile the executable's icon resource | MIT | Developer build-time helper only; Windows SDK resource compiler. No customer install. |

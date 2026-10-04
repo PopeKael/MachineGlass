@@ -123,3 +123,33 @@ PID 15644, its log records 996 ms from the tray callback to event-loop return:
 1.1 ms for collector shutdown, and 11.2 ms for tray-icon removal. No MachineGlass
 process remained afterward. This verifies one complete graceful exit; the
 earlier hang was not reproduced and its cause remains unresolved.
+
+## Hidden-window tray recovery — 4 October 2026
+
+A later shortcut-launched instance reproduced the user's inaccessible-window
+report after X hid the window. Its primary log contained no entries for that
+PID, despite the shortcut targeting the current binary and the process using
+the expected LOCALAPPDATA. The reason for the failed logging remains unknown.
+
+Tray restore now shows the native HWND directly with `ShowWindow(SW_RESTORE)`
+before queued viewport commands; Quit uses that wake-up before graceful close.
+A real native-window regression verifies visibility without an egui frame.
+Primary-log failures fall back to `%TEMP%\MachineGlass-<PID>.log`, recording
+the primary error. Both paths remain bounded and contain no process inventory.
+
+Formatting, six release tests, Clippy with warnings denied, release build and
+packaging passed. The native dashboard framebuffer was inspected. Computer Use
+clicked X on the replacement window; the visible window disappeared, the app
+remained alive, and the log recorded close-to-tray. The user subsequently ran
+the manual lifecycle, including exit/restart, and reported success. This supplies
+manual acceptance in addition to the isolated native-window regression.
+
+For the replacement instance, the log records 77 ms from tray Quit to native
+event-loop return, with native visibility confirmed before the UI observed Quit.
+Collector shutdown took 1.2 ms and tray-icon removal 20.2 ms. No MachineGlass
+process remained at the subsequent check. This verifies the reported workflow;
+broader shell-restart and Windows-session coverage remains future work.
+
+A test-process fallback log records Access denied on primary-log writes and
+successful fallback entries. This verifies the fallback path, but does not
+attribute the earlier shortcut-launch logging failure to a proven cause.

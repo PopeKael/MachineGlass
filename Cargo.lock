@@ -1074,6 +1074,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "embed-resource",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tray-icon",

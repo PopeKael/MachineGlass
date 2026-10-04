@@ -65,6 +65,8 @@ beside configuration, rotate at approximately 1 MiB, and contain lifecycle and
 internal errors rather than process inventory. No usage telemetry is sent.
 Entries include millisecond Unix timestamps and process IDs. Shutdown markers
 identify the UI, collector, tray and event-loop stages if Quit stalls.
+If the primary log cannot be written, entries are attempted in
+`%TEMP%\MachineGlass-<PID>.log`, including the primary write error.
 
 ## Develop
 

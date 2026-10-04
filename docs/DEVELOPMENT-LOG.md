@@ -6,6 +6,36 @@ findings as well as features; distinguish a successful observation from a
 proven fix. Keep raw logs, inventory and captures local under `verification/`.
 Detailed measurement evidence belongs in [verification](VERIFICATION.md).
 
+## 4 October 2026 — Hidden-window tray recovery
+
+**Trigger:** After launching through the Windows shortcut and closing with X,
+the user could neither restore the window nor quit through the tray. The
+identified process remained alive, but its launch produced no primary-log
+entries. The reason for those missing writes is not yet established.
+
+**Changes:** Tray restore now calls Windows `ShowWindow(SW_RESTORE)` on the
+borrowed eframe HWND before queuing viewport commands. Quit uses the same
+native wake-up before requesting graceful close. Previously both depended on
+a hidden window drawing another frame. Added a per-process temporary log
+fallback that includes the primary write error. Promoted the existing
+`raw-window-handle` dependency to direct use; no new package was introduced.
+
+**Verification:** All six release tests and Clippy pass. A regression test
+creates a real hidden Windows window and verifies that restore shows it
+without running an egui frame. Release packaging and native dashboard capture
+succeeded. Computer Use clicked X and confirmed the window disappeared while
+the process stayed alive, with close-to-tray entries in the log. The identified
+old stuck instance was stopped and the replacement installed at the shortcut's
+existing target. The user subsequently exercised the manual lifecycle, including
+exit/restart, and reported that it worked correctly. The replacement's log
+confirms graceful tray Quit in 77 ms, including 1.2 ms for collector shutdown
+and 20.2 ms for tray-icon removal. No MachineGlass process remained when checked.
+
+**Limits:** The successful manual check covers the reported workflow, not every
+Windows session or shell-restart scenario. A fallback log from testing captured
+an Access denied primary-write error, verifying fallback operation; it does not
+establish why the earlier shortcut-launched instance produced no entries.
+
 ## 4 October 2026 — Shutdown diagnostics
 
 **Trigger:** Tray Quit was reported to hang, requiring Task Manager to end

@@ -81,7 +81,7 @@ impl MachineGlass {
         });
         let config = Config::load();
         config::log("Starting MachineGlass 0.1.0; direct Win32 provider");
-        let tray = Tray::new(&cc.egui_ctx)
+        let tray = Tray::new(cc)
             .map_err(|e| {
                 config::log(&format!(
                     "Tray unavailable; closing window exits normally: {e}"
