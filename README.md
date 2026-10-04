@@ -63,6 +63,8 @@ Restart after editing. Intervals are bounded to 500–10000 ms, retention to
 30–120 minutes. Invalid JSON is preserved; defaults apply. Internal logs live
 beside configuration, rotate at approximately 1 MiB, and contain lifecycle and
 internal errors rather than process inventory. No usage telemetry is sent.
+Entries include millisecond Unix timestamps and process IDs. Shutdown markers
+identify the UI, collector, tray and event-loop stages if Quit stalls.
 
 ## Develop
 
@@ -84,7 +86,8 @@ Optional `--view processes` / `--view instrument` opens that view directly;
 `--search <text>` initializes the process filter.
 
 See [architecture](docs/ARCHITECTURE.md), [dependency review](docs/DEPENDENCIES.md)
-and [verification](docs/VERIFICATION.md). The original brief is preserved verbatim.
+and [verification](docs/VERIFICATION.md). Follow changes and unresolved findings
+in the [development log](docs/DEVELOPMENT-LOG.md). The original brief is preserved verbatim.
 
 This increment is a local, unsigned portable build. An installer, signing,
 Steam integration and a public repository have not been created.

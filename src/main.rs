@@ -38,6 +38,7 @@ struct MachineGlass {
     selected: Option<ProcessIdentity>,
     capture: Option<PathBuf>,
     capture_requested: bool,
+    quit_observed: bool,
 }
 
 fn bytes(v: u64) -> String {
@@ -98,6 +99,7 @@ impl MachineGlass {
             selected: None,
             capture,
             capture_requested: false,
+            quit_observed: false,
         }
     }
 
@@ -477,7 +479,22 @@ fn chart(ui: &mut egui::Ui, history: &[HistoryPoint], cpu: bool, color: Color32,
 }
 
 impl eframe::App for MachineGlass {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        config::log("Window framework entered on_exit; renderer cleanup follows");
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.quit_observed && self.tray.as_ref().is_some_and(Tray::quitting) {
+            self.quit_observed = true;
+            config::log("UI observed tray Quit request");
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            config::log(if self.tray.as_ref().is_some_and(Tray::quitting) {
+                "UI received close event; tray Quit permits shutdown"
+            } else {
+                "UI received close event without tray Quit"
+            });
+        }
         if ctx.input(|i| i.viewport().close_requested())
             && self.tray.as_ref().is_some_and(|tray| !tray.quitting())
         {
@@ -617,6 +634,12 @@ impl eframe::App for MachineGlass {
     }
 }
 
+impl Drop for MachineGlass {
+    fn drop(&mut self) {
+        config::log("App dropping; collector and tray cleanup follow");
+    }
+}
+
 fn save_bmp(path: &std::path::Path, image: &egui::ColorImage) -> std::io::Result<()> {
     use std::io::Write;
     let [w, h] = image.size;
@@ -677,5 +700,6 @@ fn main() -> eframe::Result {
     if let Err(e) = &result {
         config::log(&format!("Native window failed: {e}"));
     }
+    config::log("Native event loop returned; main exiting");
     result
 }

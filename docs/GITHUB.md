@@ -12,6 +12,11 @@ local / remote commit IDs and a clean working tree. Feature branches can hold
 future changes separately before review and merge into `main`; a separate
 "code" branch is not required.
 
+At each checkpoint, update [the development log](DEVELOPMENT-LOG.md) with the
+change, reason, validation and unresolved findings. Keep detailed measured
+evidence in [verification](VERIFICATION.md). Review those documentation changes
+alongside the source before staging and pushing.
+
 The first upload was mistakenly limited to README and LICENSE. That small
 GitHub history is retained through a merge with the local development history;
 no force push is needed. The old local `github-docs` branch is only a historical

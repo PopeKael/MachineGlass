@@ -73,8 +73,8 @@ pub fn log(message: &str) {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
-        let _ = writeln!(f, "{stamp} {message}");
+            .as_millis();
+        let _ = writeln!(f, "{stamp} pid={} {message}", std::process::id());
     }
 }
 

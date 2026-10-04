@@ -19,7 +19,7 @@ pub fn window_icon() -> IconData {
 }
 
 pub struct Tray {
-    _icon: TrayIcon,
+    icon: Option<TrayIcon>,
     quitting: Arc<AtomicBool>,
 }
 impl Tray {
@@ -50,11 +50,11 @@ impl Tray {
                 menu_ctx.send_viewport_cmd(ViewportCommand::Visible(false));
                 log("Window hidden from tray menu; collection continues");
             } else if event.id == quit_id {
+                log("Quit requested from tray menu; queuing visibility and close commands");
                 flag.store(true, Ordering::Relaxed);
                 // Wake a hidden window too; on close, the app's ordinary Drop joins collection.
                 menu_ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                 menu_ctx.send_viewport_cmd(ViewportCommand::Close);
-                log("Quit requested from tray menu");
             }
             menu_ctx.request_repaint();
         }));
@@ -78,7 +78,7 @@ impl Tray {
         }));
         log("Native stethoscope tray icon registered");
         Ok(Self {
-            _icon: icon,
+            icon: Some(icon),
             quitting,
         })
     }
@@ -99,5 +99,11 @@ impl Drop for Tray {
         TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
         // TrayIcon's Drop calls Shell_NotifyIcon(NIM_DELETE).
         log("Removing native tray icon");
+        let began = std::time::Instant::now();
+        drop(self.icon.take());
+        log(&format!(
+            "Native tray icon removed in {:.1} ms",
+            began.elapsed().as_secs_f64() * 1000.0
+        ));
     }
 }

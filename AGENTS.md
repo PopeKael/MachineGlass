@@ -19,3 +19,6 @@ of Ariadne and must remain a native Windows Rust desktop instrument.
 - Preserve third-party licence / font notices with portable packages. Keep
   private runtime inventory and screenshot captures out of Git.
 - State what was measured, what was tested and what is still unimplemented.
+- At each checkpoint, update `docs/DEVELOPMENT-LOG.md` with changes, reasons,
+  validation and unresolved findings; keep detailed evidence in
+  `docs/VERIFICATION.md`. Do not call an unreproduced issue fixed.

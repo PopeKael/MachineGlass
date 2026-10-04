@@ -52,6 +52,7 @@ impl Engine {
                     loop {
                         let began = Instant::now();
                         let snapshot = provider.sample();
+                        let snapshot_collection_ms = snapshot.collection_ms;
                         let errors = [
                             ("CPU", snapshot.cpu_percent.reason()),
                             ("Memory", snapshot.memory.reason()),
@@ -80,7 +81,13 @@ impl Engine {
                             .saturating_sub(began.elapsed());
                         match receive.recv_timeout(remaining) {
                             Err(mpsc::RecvTimeoutError::Timeout) => (),
-                            _ => break,
+                            _ => {
+                                log(&format!(
+                                    "Telemetry worker received stop; last sample {:.1} ms",
+                                    snapshot_collection_ms
+                                ));
+                                break;
+                            }
                         }
                     }
                 }));
@@ -105,11 +112,18 @@ impl Engine {
 }
 impl Drop for Engine {
     fn drop(&mut self) {
+        let began = Instant::now();
+        log("Telemetry shutdown started; signalling worker");
         let _ = self.stop.send(());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            log("Telemetry worker join reported panic");
         }
-        log("Clean shutdown");
+        log(&format!(
+            "Telemetry shutdown completed in {:.1} ms",
+            began.elapsed().as_secs_f64() * 1000.0
+        ));
     }
 }
 
@@ -117,6 +131,27 @@ impl Drop for Engine {
 mod tests {
     use super::*;
     use crate::model::Reading;
+    #[test]
+    fn shutdown_interrupts_long_sampling_wait() {
+        let engine = Engine::start(
+            Config {
+                sample_interval_ms: 10_000,
+                ..Config::default()
+            },
+            eframe::egui::Context::default(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while engine.state.lock().unwrap().latest.is_none() {
+            assert!(Instant::now() < deadline, "First Windows sample timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let began = Instant::now();
+        drop(engine);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "Shutdown waited for the ten-second sampling interval"
+        );
+    }
     fn sample(ms: u64, cpu: Reading<f64>) -> Snapshot {
         Snapshot {
             unix_ms: ms,

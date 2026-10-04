@@ -97,3 +97,29 @@ and development history in the private GitHub repository.
   those crates, stored locally with provenance, and added as packaging fallbacks.
   Packaging now rejects unrecognized missing notices instead of silently
   leaving an incomplete redistribution bundle.
+
+## Tray shutdown investigation — 4 October 2026
+
+The user reported that tray Quit did not finish and Task Manager was needed.
+The earlier seconds-only log contains an eleven-second gap between a Quit
+request and collector cleanup, but lacks process IDs and stage markers. That
+entry cannot establish the cause or be attributed confidently to this report.
+
+Added diagnostic markers without changing the Quit/close-to-tray policy:
+millisecond Unix timestamps and PID on log entries, UI observation of Quit and
+close events, framework on_exit, app destruction, collector stop/join timings,
+actual tray-icon destruction timing, and return from the native event loop.
+No process inventory is included. Old log entries retain their earlier format.
+
+Five tests pass, including a real Windows collector check that shutdown
+interrupts a ten-second sampling wait in under one second. Formatting, Clippy
+with warnings denied, and the release build pass. A native tray-menu reproduction
+was subsequently performed by the user, as recorded below. This diagnostic
+increment is not a confirmed fix for the earlier intermittent failure.
+
+The user reported a quick successful tray Quit on the diagnostic build. For
+PID 15644, its log records 996 ms from the tray callback to event-loop return:
+959 ms before the UI observed Quit, 16 ms from that observation to on_exit,
+1.1 ms for collector shutdown, and 11.2 ms for tray-icon removal. No MachineGlass
+process remained afterward. This verifies one complete graceful exit; the
+earlier hang was not reproduced and its cause remains unresolved.
