@@ -96,5 +96,8 @@ MachineGlass's original source and documentation are licensed under the
 retain their own licences and notices.
 
 The [private GitHub repository](https://github.com/PopeKael/MachineGlass) contains
-only the prepared project README and licence. Source and binaries remain local.
-See [upload scope and branch layout](docs/GITHUB.md) before pushing changes.
+the application source, build scripts, original assets, documentation and MIT
+licence. Local `main` tracks GitHub `main`; checkpoints include the source code.
+Generated application binaries, logs and machine captures are excluded.
+See [GitHub workflow](docs/GITHUB.md). The repository stays private until an
+explicit decision to make it public.

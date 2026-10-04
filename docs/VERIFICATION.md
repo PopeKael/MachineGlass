@@ -72,8 +72,9 @@ yet tested. Sorting controls and process-detail interactions still need broader
 hands-on acceptance beyond the rendered filtered-list check.
 
 Local raw probe output, comparisons and native framebuffer captures are under
-`verification/` and excluded from Git. The source is a separate local Git
-checkpoint; it has not been pushed to a remote.
+`verification/` and excluded from Git. The source was initially checkpointed
+locally; on 4 October 2026 the upload scope was corrected to include the source
+and development history in the private GitHub repository.
 
 ## Stethoscope icon and system tray increment
 

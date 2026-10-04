@@ -1,21 +1,25 @@
-# Private GitHub documentation repository
+# Private GitHub source repository
 
 Repository: https://github.com/PopeKael/MachineGlass
 
-The authorized initial upload contains **README.md and LICENSE only**. These
-files are prepared in the local `github/` directory. MachineGlass's original
-software and documentation use MIT. The application source remains local.
+MachineGlass's application source, build scripts, original icon assets, product
+documentation, licence notices and MIT licence are stored here. The repository
+is private. Only the owner and explicitly authorized collaborators can access it.
 
-The local `main` branch contains the complete development history. The remote
-`main` branch has separate documentation-only history. **Do not push local
-`main` to remote `main`**, including when the repository is private, without an
-explicit change in upload scope.
+Local `main` tracks `origin/main` on GitHub. A checkpoint means reviewing and
+committing the intended source changes, pushing them, and verifying identical
+local / remote commit IDs and a clean working tree. Feature branches can hold
+future changes separately before review and merge into `main`; a separate
+"code" branch is not required.
 
-The remote is named `docs-only`. Its configured push mapping is
-`github-docs:main`, and `github-docs` tracks `docs-only/main`. Local `main` has
-no remote upstream. To update documentation, publish only the two prepared
-files to that documentation branch or use the GitHub contents API, then fetch
-the remote. Do not upload binaries, verification captures or process inventory.
+The first upload was mistakenly limited to README and LICENSE. That small
+GitHub history is retained through a merge with the local development history;
+no force push is needed. The old local `github-docs` branch is only a historical
+reference. Normal future checkpoints use `main` and `origin`.
+
+Do not commit `target/`, `dist/`, `verification/`, logs, machine inventories or
+credentials. The generated icon assets are intentional source assets; the
+compiled application executable is not.
 
 Keep repository visibility private until explicitly instructed otherwise.
 MIT allows reuse with the copyright and licence notice retained. It does not
