@@ -17,6 +17,13 @@ Implemented so far:
 - Searchable, sortable process inspection with executable paths and creation identities.
 - Recent CPU and memory graphs and a bounded 30-minute core history buffer.
 - A self-monitoring view and explicit unavailable / unsupported measurement states.
+- Native system tray controls with original stethoscope branding for the tray,
+  window and executable. Closing the window hides it while monitoring continues;
+  the tray provides Show, Hide and Quit.
+
+The release build, collector/history tests and static checks pass. The native
+window icon and live dashboard have been visually checked. Interactive tray
+hide/restore/quit acceptance remains to be completed.
 
 Planned increments include process hierarchy, hardware identification, storage,
 networking, GPU telemetry, services and a flight recorder with historical
