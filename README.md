@@ -78,3 +78,13 @@ and [verification](docs/VERIFICATION.md). The original brief is preserved verbat
 
 This increment is a local, unsigned portable build. An installer, signing,
 Steam integration and a public repository have not been created.
+
+## Licence and GitHub
+
+MachineGlass's original source and documentation are licensed under the
+[MIT License](LICENSE), copyright 2026 Warren Gerdes. Third-party components
+retain their own licences and notices.
+
+The [private GitHub repository](https://github.com/PopeKael/MachineGlass) contains
+only the prepared project README and licence. Source and binaries remain local.
+See [upload scope and branch layout](docs/GITHUB.md) before pushing changes.

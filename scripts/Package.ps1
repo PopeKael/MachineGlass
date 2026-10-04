@@ -8,6 +8,7 @@ try {
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
     Copy-Item -LiteralPath $binary -Destination (Join-Path $OutputDirectory 'MachineGlass.exe')
     Copy-Item -LiteralPath 'README.md' -Destination $OutputDirectory
+    Copy-Item -LiteralPath 'LICENSE' -Destination $OutputDirectory
     Copy-Item -LiteralPath 'docs' -Destination $OutputDirectory -Recurse -Force
     $metadataText = & cargo metadata --locked --offline --format-version 1 --filter-platform x86_64-pc-windows-msvc
     if ($LASTEXITCODE -ne 0) { throw 'Could not inspect locked dependencies.' }

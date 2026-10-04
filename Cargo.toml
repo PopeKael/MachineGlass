@@ -3,7 +3,7 @@ name = "machineglass"
 version = "0.1.0"
 edition = "2024"
 description = "Native Windows system observability console"
-license = "LicenseRef-Proprietary"
+license = "MIT"
 default-run = "MachineGlass"
 
 [[bin]]
