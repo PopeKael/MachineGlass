@@ -47,3 +47,9 @@ Official sources:
 Before public sale: validate all licence obligations and font notices, audit
 locked dependencies, benchmark rendering on integrated GPUs / remote sessions,
 verify Windows-version coverage, sign the executable and package an installer.
+
+GPU increment adds `windows 0.62.2` (MIT OR Apache-2.0) for generated DXGI COM
+bindings and enables windows-sys PDH bindings. These compile into the binary and
+call Windows system DLLs; they add no customer-installed runtime. RAII handles
+COM release and PDH query closure. The existing package script includes the new
+Windows crate licence texts and locked transitive dependencies.

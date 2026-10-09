@@ -34,6 +34,12 @@ proof-of-concept question.
   matching a different process. Protected or disappearing processes show
   unavailable values rather than invented zeroes.
 - CPU / RAM graphs covering 90 seconds; a bounded 30-minute core history buffer.
+- Native WDDM GPU dashboard: adapter name, busiest-engine overall activity,
+  dominant Windows engine label, busiest Compute and 3D graphs, dedicated and
+  shared memory. All Windows engine measurements remain available internally
+  and in the expandable engine list. GPU history is bounded to 90 seconds.
+  Compact 2x2 CPU/RAM/dedicated/shared memory graphlets sit above the three GPU
+  activity graphlets. Minimum client width: 832 pixels.
 - Self-observation, source information and capability status in **The instrument**.
 
 Process CPU uses total machine capacity: one saturated logical processor on a
@@ -43,7 +49,7 @@ available. CPU uses idle-time deltas, rather than Task Manager's frequency-scale
 processor utility; the numbers can differ. Multiple processor groups are
 explicitly unsupported by this first total-CPU collector.
 
-GPU / VRAM, temperatures, process trees, disks, network, services, storage
+Temperatures, process trees, disks, network, services, storage
 scanning, process history, trace saving and historical replay are **not yet
 implemented**. There are no simulated values or actions that modify processes
 or clean files. A graph gap means no reading, not zero usage.
@@ -81,8 +87,8 @@ cargo build --release --locked
 .\target\release\collector-probe.exe
 ```
 
-The console probe exports only its own process plus core metrics for verification;
-it is not included in customer packaging. `MachineGlass.exe --capture <path.bmp>`
+The console probe exports only its own process plus CPU/RAM/GPU metrics for verification;
+it is not included in customer packaging. Use `--samples 120` for bounded JSONL sampling. `MachineGlass.exe --capture <path.bmp>`
 saves one actual rendered framebuffer after four samples for local visual QA.
 Optional `--view processes` / `--view instrument` opens that view directly;
 `--search <text>` initializes the process filter.

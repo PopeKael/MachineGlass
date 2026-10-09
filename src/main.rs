@@ -103,21 +103,24 @@ impl MachineGlass {
         }
     }
 
-    fn overview(&mut self, ui: &mut egui::Ui, s: &Snapshot, history: &[HistoryPoint]) {
+    fn overview(
+        &mut self,
+        ui: &mut egui::Ui,
+        s: &Snapshot,
+        history: &[HistoryPoint],
+        gpu_history: &[GpuHistoryPoint],
+    ) {
         ui.heading("System overview");
         ui.label(RichText::new("See what your machine is actually doing.").color(MUTED));
         ui.add_space(12.0);
         ui.columns(2, |cols| {
             card(
                 &mut cols[0],
-                "CPU · TOTAL MACHINE",
+                "CPU",
                 &percent(&s.cpu_percent),
                 ACCENT,
                 |ui| {
-                    ui.label(format!(
-                        "{} logical processors · system-time deltas",
-                        s.logical_processors
-                    ));
+                    ui.label(format!("{} logical processors", s.logical_processors));
                     chart(ui, history, true, ACCENT, self.config.sample_interval_ms);
                 },
             );
@@ -145,6 +148,7 @@ impl MachineGlass {
                 },
             );
         });
+        self.gpus(ui, s, gpu_history);
         ui.add_space(14.0);
         let days = s.uptime_seconds / 86400;
         let hours = s.uptime_seconds / 3600 % 24;
@@ -203,13 +207,107 @@ impl MachineGlass {
         }
         ui.add_space(20.0);
         ui.separator();
-        ui.label(RichText::new("GPU / VRAM / temperatures / storage / network: collectors not implemented in this milestone.").color(MUTED));
+        ui.label(RichText::new("Storage / network / additional sensors: collectors not implemented in this milestone.").color(MUTED));
         ui.label(RichText::new("Core history stays in memory for 30 minutes by default. Trace replay and process history arrive later.").color(MUTED));
     }
 
+    fn gpus(&self, ui: &mut egui::Ui, s: &Snapshot, history: &[GpuHistoryPoint]) {
+        ui.add_space(12.0);
+        let Some(gpus) = s.gpus.value() else {
+            ui.heading("GPU");
+            ui.label(s.gpus.reason());
+            return;
+        };
+        if gpus.is_empty() {
+            ui.label("No hardware GPU adapters detected");
+        }
+        for gpu in gpus {
+            ui.columns(2, |cols| {
+                gpu_memory_card(&mut cols[0], "DEDICATED GPU MEMORY", gpu, history, false);
+                gpu_memory_card(&mut cols[1], "SHARED GPU MEMORY", gpu, history, true);
+            });
+            ui.add_space(6.0);
+            ui.heading(&gpu.name);
+            let dominant = gpu
+                .engines
+                .value()
+                .and_then(|engines| busiest_engine(engines, |_| true));
+            let overall = gpu.activity(|_| true);
+            let dominant_label = if overall.value().is_some() {
+                dominant.map(|e| e.label.as_str()).unwrap_or("Unavailable")
+            } else {
+                overall.reason()
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Dominant: {dominant_label}"));
+                ui.separator();
+                ui.label(format!(
+                    "Temperature: {}",
+                    gpu.temperature_c
+                        .value()
+                        .map(|t| format!("{t:.1} °C"))
+                        .unwrap_or_else(|| "Unavailable".into())
+                ));
+            });
+            ui.columns(3, |cols| {
+                for (col, title, filter) in [
+                    (
+                        0,
+                        "OVERALL GPU ACTIVITY",
+                        (|_: &GpuEngine| true) as fn(&GpuEngine) -> bool,
+                    ),
+                    (
+                        1,
+                        "COMPUTE · BUSIEST",
+                        compute_engine as fn(&GpuEngine) -> bool,
+                    ),
+                    (2, "3D ENGINE", three_d_engine as fn(&GpuEngine) -> bool),
+                ] {
+                    let activity = gpu.activity(filter);
+                    let label = gpu
+                        .engines
+                        .value()
+                        .and_then(|es| busiest_engine(es, filter))
+                        .map(|e| e.label.as_str());
+                    card(&mut cols[col], title, &percent(&activity), ACCENT, |ui| {
+                        ui.label(label.unwrap_or_else(|| activity.reason()));
+                        let points: Vec<_> = history
+                            .iter()
+                            .map(|p| HistoryPoint {
+                                unix_ms: p.unix_ms,
+                                cpu_percent: p
+                                    .adapters
+                                    .iter()
+                                    .find(|g| g.id == gpu.id)
+                                    .and_then(|g| g.activity(filter).value().copied()),
+                                memory_percent: None,
+                            })
+                            .collect();
+                        chart_height(ui, &points, true, ACCENT, 1000, 24.0);
+                    });
+                }
+            });
+            egui::CollapsingHeader::new("All Windows engines")
+                .id_salt(&gpu.id)
+                .show(ui, |ui| {
+                    if let Some(engines) = gpu.engines.value() {
+                        for engine in engines {
+                            ui.label(format!(
+                                "{} · {} · {}",
+                                engine.label,
+                                engine.id,
+                                percent(&engine.percent)
+                            ));
+                        }
+                    } else {
+                        ui.label(gpu.engines.reason());
+                    }
+                });
+        }
+    }
     fn processes(&mut self, ui: &mut egui::Ui, s: &Snapshot) {
         ui.heading("Process inspection");
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.add(
                 egui::TextEdit::singleline(&mut self.query)
                     .hint_text("Search name, PID or executable path")
@@ -270,17 +368,18 @@ impl MachineGlass {
         });
         ui.label(format!("{} of {} processes", rows.len(), processes.len()));
         ui.separator();
+        let name_width = (ui.available_width() - 438.0).clamp(180.0, 280.0);
         let row_ui =
             |ui: &mut egui::Ui, p: Option<&Process>, selected: &mut Option<ProcessIdentity>| {
                 ui.horizontal(|ui| {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(280.0, 22.0),
+                        egui::vec2(name_width, 22.0),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            ui.set_min_width(280.0);
+                            ui.set_min_width(name_width);
                             if let Some(p) = p {
                                 let response = ui.add_sized(
-                                    [280.0, 22.0],
+                                    [name_width, 22.0],
                                     egui::Button::selectable(
                                         p.identity.is_some() && *selected == p.identity,
                                         &p.name,
@@ -378,9 +477,9 @@ impl MachineGlass {
         }
         ui.add_space(16.0);
         ui.heading("Capabilities");
-        ui.label("Live: CPU, physical RAM, processes, paths, creation identities, uptime.");
+        ui.label("Live: CPU, RAM, processes, uptime, WDDM GPU engines and adapter memory.");
         ui.label(
-            "Not implemented: GPU, sensors, storage, network, services, scans, trace persistence.",
+            "Not implemented: temperature, storage, network, services, scans, trace persistence.",
         );
         ui.label(
             "No administrator requirement, telemetry upload, process control or file cleanup.",
@@ -416,6 +515,50 @@ impl MachineGlass {
     }
 }
 
+fn gpu_memory_card(
+    ui: &mut egui::Ui,
+    title: &str,
+    gpu: &Gpu,
+    history: &[GpuHistoryPoint],
+    shared: bool,
+) {
+    let (used, total) = if shared {
+        (&gpu.shared_used_bytes, &gpu.shared_limit_bytes)
+    } else {
+        (&gpu.dedicated_used_bytes, &gpu.dedicated_total_bytes)
+    };
+    let value = format!("{} / {}", memory_value(used), memory_value(total));
+    card(ui, title, &value, BLUE, |ui| {
+        let available = match (used.value(), total.value()) {
+            (Some(u), Some(t)) if u <= t => format!("{} available", bytes(t - u)),
+            _ => "Available: unavailable".into(),
+        };
+        ui.label(available).on_hover_text(&gpu.name);
+        let points: Vec<_> = history
+            .iter()
+            .map(|p| {
+                let value = p.adapters.iter().find(|g| g.id == gpu.id).and_then(|g| {
+                    let (used, total) = if shared {
+                        (&g.shared_used_bytes, &g.shared_limit_bytes)
+                    } else {
+                        (&g.dedicated_used_bytes, &g.dedicated_total_bytes)
+                    };
+                    match (used.value(), total.value()) {
+                        (Some(u), Some(t)) if *t > 0 => Some(*u as f64 / *t as f64 * 100.0),
+                        _ => None,
+                    }
+                });
+                HistoryPoint {
+                    unix_ms: p.unix_ms,
+                    cpu_percent: value,
+                    memory_percent: None,
+                }
+            })
+            .collect();
+        chart_height(ui, &points, true, BLUE, 1000, 44.0);
+    });
+}
+
 fn card(
     ui: &mut egui::Ui,
     title: &str,
@@ -425,19 +568,30 @@ fn card(
 ) {
     egui::Frame::new()
         .fill(Color32::from_rgb(23, 33, 46))
-        .inner_margin(18.0)
-        .corner_radius(10.0)
+        .inner_margin(8.0)
+        .corner_radius(7.0)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(RichText::new(title).size(12.0).color(MUTED));
-            ui.label(RichText::new(value).size(29.0).color(color));
+            ui.spacing_mut().item_spacing.y = 4.0;
+            ui.label(RichText::new(title).size(11.0).color(MUTED));
+            ui.label(RichText::new(value).size(11.0).color(color));
             body(ui);
         });
 }
 
 fn chart(ui: &mut egui::Ui, history: &[HistoryPoint], cpu: bool, color: Color32, interval_ms: u64) {
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 130.0),
+    chart_height(ui, history, cpu, color, interval_ms, 44.0);
+}
+fn chart_height(
+    ui: &mut egui::Ui,
+    history: &[HistoryPoint],
+    cpu: bool,
+    color: Color32,
+    interval_ms: u64,
+    height: f32,
+) {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
         egui::Sense::hover(),
     );
     let painter = ui.painter_at(rect);
@@ -471,11 +625,7 @@ fn chart(ui: &mut egui::Ui, history: &[HistoryPoint], cpu: bool, color: Color32,
             }
         }
     }
-    ui.label(
-        RichText::new("Last 90 seconds · fixed 0–100% scale · gaps mean no measurement")
-            .size(11.0)
-            .color(MUTED),
-    );
+    response.on_hover_text("Last 90 seconds · 0–100% scale · gaps mean unavailable readings");
 }
 
 impl eframe::App for MachineGlass {
@@ -502,11 +652,12 @@ impl eframe::App for MachineGlass {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             config::log("Window closed to tray; collection continues");
         }
-        let (latest, history, age, error) = {
+        let (latest, history, gpu_history, age, error) = {
             let state = self.engine.state.lock().unwrap_or_else(|e| e.into_inner());
             (
                 state.latest.clone(),
                 state.history.iter().cloned().collect::<Vec<_>>(),
+                state.gpu_history.iter().cloned().collect::<Vec<_>>(),
                 state.last_arrival.map(|i| i.elapsed()),
                 state.error.clone(),
             )
@@ -541,7 +692,7 @@ impl eframe::App for MachineGlass {
             });
         });
         egui::SidePanel::left("navigation")
-            .exact_width(185.0)
+            .exact_width(156.0)
             .resizable(false)
             .show(ctx, |ui| {
                 ui.add_space(20.0);
@@ -552,7 +703,7 @@ impl eframe::App for MachineGlass {
                 ] {
                     if ui
                         .add_sized(
-                            [160.0, 42.0],
+                            [132.0, 36.0],
                             egui::Button::new(label).selected(self.page == page),
                         )
                         .clicked()
@@ -600,7 +751,7 @@ impl eframe::App for MachineGlass {
                     self.processes(ui, s);
                 } else {
                     egui::ScrollArea::vertical().show(ui, |ui| match self.page {
-                        Page::Overview => self.overview(ui, s, &history),
+                        Page::Overview => self.overview(ui, s, &history, &gpu_history),
                         Page::Instrument => self.instrument(ui, s, &history),
                         Page::Processes => (),
                     });
@@ -687,8 +838,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("MachineGlass")
             .with_icon(tray::window_icon())
-            .with_inner_size([1180.0, 800.0])
-            .with_min_inner_size([1040.0, 720.0]),
+            .with_inner_size([944.0, 720.0])
+            .with_min_inner_size([832.0, 640.0]),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };

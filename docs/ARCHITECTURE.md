@@ -44,3 +44,35 @@ by the dependency but has not been exercised by restarting the user's shell.
 Next increment: process hierarchy, CPU model / topology, drive capacity and
 network throughput. Keep each additional Windows collector independently
 verifiable. Record the source and error state before adding interpretation.
+
+## Basic GPU provider — 9 October 2026
+
+`WindowsGpuProvider` is owned by the existing Windows telemetry worker. DXGI
+factories enumerate hardware adapters and obtain names, LUID identities and
+memory capacities. COM interfaces release automatically. A RAII PDH query uses
+English wildcard counter paths (independent of the Windows display language)
+for GPU Engine utilization and GPU Adapter Memory dedicated/shared usage.
+No vendor library, driver installation, elevation, network or external runtime
+is involved. All collection remains outside the UI thread.
+
+Windows engine counters are per-process slices. Normalization groups by adapter
+LUID, physical-adapter index and engine index, sums only slices of that same
+engine and bounds its percentage to 100. Windows engtype labels are preserved.
+Overall activity is the maximum engine percentage; the Compute and 3D series
+are maxima within their dynamically discovered classes. An invalid constituent
+makes that engine unavailable; an unavailable engine prevents claiming an exact
+adapter maximum. Unsupported classes and measured zero remain distinct.
+
+The normalized `Gpu`/`GpuEngine` models retain every engine. A separate bounded
+GPU history retains 90 seconds (at most 91 snapshots at the default one-second
+interval), preserving gaps and full engine identity. Existing CPU/RAM retention
+is unchanged. The UI consumes models only and selects maxima separately for
+each historical sample, including when the dominant compute engine changes.
+Adapter enumeration is refreshed each sample; failed query registration retries
+periodically. Physical driver reset/hotplug and multi-adapter hardware remain
+untested. No reliable temperature provider exists in the current app.
+
+Dedicated total is DXGI usable capacity and can differ from physical VRAM shown
+by Task Manager when hardware reserves memory. Shared available means the DXGI
+shared-memory limit minus current adapter shared usage; it is not free system RAM
+or a guarantee that an application can allocate that amount.

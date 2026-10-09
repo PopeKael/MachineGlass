@@ -53,6 +53,7 @@ pub fn cpu_delta(previous: (u64, u64), current: (u64, u64)) -> Option<f64> {
 
 #[derive(Default)]
 pub struct WindowsProvider {
+    gpu: crate::gpu::WindowsGpuProvider,
     previous_cpu: Option<(u64, u64)>,
     previous_processes: HashMap<ProcessIdentity, (u64, Instant)>,
 }
@@ -222,6 +223,7 @@ impl TelemetryProvider for WindowsProvider {
         let cpu_percent = self.cpu();
         let memory = self.memory();
         let processes = self.processes(logical_processors);
+        let gpus = self.gpu.sample();
         Snapshot {
             unix_ms: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -232,6 +234,7 @@ impl TelemetryProvider for WindowsProvider {
             cpu_percent,
             memory,
             processes,
+            gpus,
             collection_ms: began.elapsed().as_secs_f64() * 1000.0,
         }
     }

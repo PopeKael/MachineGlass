@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, log},
-    model::{HistoryPoint, Snapshot},
+    model::{GpuHistoryPoint, HistoryPoint, Snapshot},
     provider::{TelemetryProvider, WindowsProvider},
 };
 use std::{
@@ -13,12 +13,25 @@ use std::{
 #[derive(Default)]
 pub struct State {
     pub latest: Option<Arc<Snapshot>>,
+    pub gpu_history: VecDeque<GpuHistoryPoint>,
     pub history: VecDeque<HistoryPoint>,
     pub last_arrival: Option<Instant>,
     pub error: Option<String>,
 }
 impl State {
     fn record(&mut self, snapshot: Snapshot, config: &Config) {
+        self.gpu_history.push_back(GpuHistoryPoint {
+            unix_ms: snapshot.unix_ms,
+            adapters: snapshot.gpus.value().cloned().unwrap_or_default(),
+        });
+        while self.gpu_history.len() > 91
+            || self
+                .gpu_history
+                .front()
+                .is_some_and(|p| p.unix_ms < snapshot.unix_ms.saturating_sub(90_000))
+        {
+            self.gpu_history.pop_front();
+        }
         self.history.push_back(HistoryPoint::from(&snapshot));
         while self.history.len() > config.history_capacity() {
             self.history.pop_front();
@@ -160,6 +173,7 @@ mod tests {
             cpu_percent: cpu,
             memory: Reading::Unavailable("test".into()),
             processes: Reading::Value(Vec::new()),
+            gpus: Reading::Value(Vec::new()),
             collection_ms: 0.0,
         }
     }
@@ -171,6 +185,8 @@ mod tests {
             state.record(sample(second * 1000, Reading::Value(0.0)), &config);
         }
         assert_eq!(state.history.len(), 1801);
+        assert_eq!(state.gpu_history.len(), 91);
+        assert_eq!(state.gpu_history.front().unwrap().unix_ms, 1_810_000);
         assert_eq!(state.history.front().unwrap().unix_ms, 100_000);
         state.record(
             sample(1_901_000, Reading::Unavailable("provider failed".into())),
@@ -182,6 +198,7 @@ mod tests {
             state.record(sample(1000, Reading::Value(1.0)), &config);
         }
         assert!(state.history.len() <= config.history_capacity());
+        assert!(state.gpu_history.len() <= 91);
         state.record(sample(10_000_000, Reading::Value(1.0)), &config);
         assert_eq!(state.history.len(), 1);
     }

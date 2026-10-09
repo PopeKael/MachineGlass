@@ -685,6 +685,14 @@ Demonstrate live:
 - memory
 - process list
 
+**Scope amendment, 9 October 2026:** Basic read-only GPU/WDDM engine telemetry,
+90-second GPU graphs and dedicated/shared memory move into the current milestone.
+Overall GPU Activity is the busiest engine per adapter, never an engine average
+or sum. Enumerate adapter/engine identities dynamically; retain every engine and
+initially display the busiest Compute-type engine and 3D where exposed. Missing
+values remain unavailable. Temperature is optional and does not block delivery.
+This amendment does not begin storage, networking or Flight Recorder work.
+
 ## Milestone 2: Useful Task Manager Replacement
 
 Add:
@@ -703,8 +711,7 @@ At this point MachineGlass should already be useful in normal troubleshooting.
 
 Add:
 
-- GPU
-- VRAM
+- advanced GPU / sensor capabilities beyond the basic current-milestone provider
 - sensors where available
 - drive details
 - storage scanner

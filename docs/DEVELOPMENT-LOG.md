@@ -6,6 +6,93 @@ findings as well as features; distinguish a successful observation from a
 proven fix. Keep raw logs, inventory and captures local under `verification/`.
 Detailed measurement evidence belongs in [verification](VERIFICATION.md).
 
+## 9 October 2026 — GPU telemetry and compact dashboard checkpoint
+
+User accepted the compact display and requested a GitHub checkpoint. Reviewed
+all accumulated GPU-provider, normalized model/history, dashboard, probe and
+documentation changes. The final UI has a 2x2 CPU/RAM/dedicated/shared-memory
+grid above one Overall/Compute/3D row, title-sized values and graph tooltips.
+The RX 7800 XT measurement comparison, workload recovery, allocated-memory
+behaviour and matched overhead observations are preserved in VERIFICATION.md.
+Temperature remains unavailable; no storage, networking or recorder work began.
+
+Checkpoint validation: `cargo fmt --check`, all nine `cargo test --locked`
+tests, `cargo clippy --all-targets --locked -- -D warnings`, and
+`cargo build --release --locked` passed again. The final portable executable
+matches the release SHA256 recorded in verification. Earlier native checks
+cover actual default/minimum rendering and the narrower process page.
+Reviewed source/documentation only; private runtime evidence, screenshots,
+local baseline builds and portable binaries remain ignored. This checkpoint
+uses the existing private repository's main branch without changing visibility.
+Commit/push completion and exact remote-tip parity are checked after committing.
+
+## 9 October 2026 — Tighter cell typography
+
+Matched numeric reading text to the 11-point cell-title size and removed the
+repeated graph-history captions. History/scale/gap information is available on
+graph hover instead. Kept graph heights, measured data and the 2x2 plus three-cell
+layout unchanged. Native rendering confirms CPU/memory cells reduced from 139
+to 113 pixels and activity cells from 119 to 93 pixels (another 26 pixels each).
+Formatting, all nine tests, Clippy with warnings denied and release build pass.
+Verified the actual default-size framebuffer; refreshed the portable build.
+
+## 9 October 2026 — Compact dashboard and GPU memory graphlets
+
+Rearranged the overview into CPU / physical RAM above dedicated / shared GPU
+memory (2x2), followed by the existing Overall / Compute / 3D row. Added both
+GPU memory graphlets from the existing normalized 90-second history. They show
+used memory as a percentage of the measured capacity/limit; missing readings
+remain gaps. No provider, sampling or aggregation changes were required.
+
+Reduced CPU/memory cells from approximately 277 to 139 pixels tall and GPU
+activity cells from approximately 227 to 119 pixels. Reduced minimum client
+width 20%, from 1040 to 832 pixels. New default client size is 944x720, minimum
+832x640. Narrowed navigation and made the process-name column responsive so
+process inspection still fits at the new width.
+
+Validation: formatting, all nine tests, Clippy with warnings denied and release
+build passed. Inspected native framebuffer at default size; used native window
+resizing to verify all seven graphlets at 832x640. Checked the narrower process
+page: name, PID, parent PID, CPU, working set, search and sort remain visible.
+The expanded engine list and long error reasons can increase content height;
+vertical scrolling remains available. Physical multi-GPU layouts remain untested.
+
+## 9 October 2026 — Basic WDDM GPU telemetry
+
+Moved basic GPU monitoring into the current milestone without beginning storage,
+networking or Flight Recorder. The existing telemetry worker now uses DXGI for
+adapter identity/capacity and Windows PDH GPU counters for utilization and
+adapter memory. No vendor utility, Python, external runtime or elevation is
+required. Monitoring remains read-only.
+
+Every exposed engine is retained by adapter LUID, physical index and engine
+index, with its actual Windows label. Per-process slices are combined only for
+the same engine. Overall GPU Activity is the busiest engine, with separate
+busiest-Compute and 3D series. Missing values remain unavailable; the first
+sample warms up. GPU history is bounded to 90 seconds; CPU/RAM retention and
+unrelated functionality remain unchanged. The dashboard includes dedicated and
+shared memory and an explicit unavailable temperature status. Shortened GPU
+graphs after native rendering showed memory readings below the default fold.
+
+Validation: formatting, nine tests, Clippy with warnings denied and release
+build pass. Tested engine grouping, adapter isolation, multiple Compute maxima,
+measured zero versus missing, and history retention. The RX 7800 XT exposed eight
+engines. Compared native rendering and Task Manager during normal desktop use
+and bounded AI embedding workloads. Both show Compute 0 driving overall
+activity during compute, with much lower 3D activity. Compute returned to zero
+within two samples of workload completion while VRAM remained allocated.
+Matched 30-second overhead: previous source 0.381% CPU / 112.8 MiB working set;
+GPU build 0.345% / 102.3 MiB. No material increase was observed in that interval.
+Portable packaging includes new dependency licence texts. Detailed measurements
+and limitations are recorded in VERIFICATION.md; private traces remain ignored.
+
+Limits: no native temperature provider; no physical multi-GPU, hotplug/driver
+reset or non-English Windows acceptance yet. Desktop background video activity
+remained present during low-activity checks, so a completely quiescent all-engine
+zero test is not claimed. DXGI dedicated capacity is usable memory (15.80 GiB
+here), whereas Task Manager displays 16.0 GB physical memory and separately
+reports 207 MB hardware-reserved. No unmeasured physical total is substituted.
+
 ## 4 October 2026 — Hidden-window tray recovery
 
 **Trigger:** After launching through the Windows shortcut and closing with X,

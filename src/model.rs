@@ -65,6 +65,7 @@ pub struct Snapshot {
     pub cpu_percent: Reading<f64>,
     pub memory: Reading<Memory>,
     pub processes: Reading<Vec<Process>>,
+    pub gpus: Reading<Vec<Gpu>>,
     pub collection_ms: f64,
 }
 
@@ -81,5 +82,113 @@ impl From<&Snapshot> for HistoryPoint {
             cpu_percent: s.cpu_percent.value().copied(),
             memory_percent: s.memory.value().map(Memory::percent),
         }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GpuEngine {
+    pub id: String,
+    /// Exact engtype label exposed by Windows, never a vendor-specific mapping.
+    pub label: String,
+    pub percent: Reading<f64>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Gpu {
+    pub id: String,
+    pub name: String,
+    pub engines: Reading<Vec<GpuEngine>>,
+    pub dedicated_used_bytes: Reading<u64>,
+    pub dedicated_total_bytes: Reading<u64>,
+    pub shared_used_bytes: Reading<u64>,
+    pub shared_limit_bytes: Reading<u64>,
+    pub temperature_c: Reading<f64>,
+}
+pub fn busiest_engine(
+    engines: &[GpuEngine],
+    filter: impl Fn(&GpuEngine) -> bool,
+) -> Option<&GpuEngine> {
+    engines
+        .iter()
+        .filter(|e| filter(e) && e.percent.value().is_some())
+        .max_by(|a, b| {
+            a.percent
+                .value()
+                .unwrap()
+                .total_cmp(b.percent.value().unwrap())
+                .then_with(|| b.id.cmp(&a.id))
+        })
+}
+impl Gpu {
+    pub fn activity(&self, filter: impl Fn(&GpuEngine) -> bool) -> Reading<f64> {
+        match &self.engines {
+            Reading::Value(engines) => {
+                let candidates: Vec<_> = engines.iter().filter(|e| filter(e)).collect();
+                if candidates.is_empty() {
+                    return Reading::Unsupported("Engine class not exposed".into());
+                }
+                if let Some(e) = candidates.iter().find(|e| e.percent.value().is_none()) {
+                    return e.percent.clone();
+                }
+                busiest_engine(engines, filter)
+                    .map(|e| e.percent.clone())
+                    .unwrap_or_else(|| Reading::Unavailable("No engine readings".into()))
+            }
+            Reading::WarmingUp => Reading::WarmingUp,
+            Reading::Unavailable(e) => Reading::Unavailable(e.clone()),
+            Reading::Unsupported(e) => Reading::Unsupported(e.clone()),
+        }
+    }
+}
+pub fn compute_engine(e: &GpuEngine) -> bool {
+    e.label.to_ascii_lowercase().contains("compute")
+}
+pub fn three_d_engine(e: &GpuEngine) -> bool {
+    e.label.eq_ignore_ascii_case("3d")
+}
+
+#[derive(Clone, Debug)]
+pub struct GpuHistoryPoint {
+    pub unix_ms: u64,
+    pub adapters: Vec<Gpu>,
+}
+
+#[cfg(test)]
+mod gpu_model_tests {
+    use super::*;
+    #[test]
+    fn busiest_compute_and_overall_preserve_missing_and_zero() {
+        let engine = |id: &str, label: &str, percent| GpuEngine {
+            id: id.into(),
+            label: label.into(),
+            percent,
+        };
+        let mut gpu = Gpu {
+            id: "adapter".into(),
+            name: "test".into(),
+            engines: Reading::Value(vec![
+                engine("1", "Compute 7", Reading::Value(25.0)),
+                engine("2", "Compute 8", Reading::Value(60.0)),
+                engine("3", "3D", Reading::Value(90.0)),
+            ]),
+            dedicated_used_bytes: Reading::Value(100),
+            dedicated_total_bytes: Reading::Value(200),
+            shared_used_bytes: Reading::Value(0),
+            shared_limit_bytes: Reading::Value(200),
+            temperature_c: Reading::Unsupported("test".into()),
+        };
+        assert_eq!(gpu.activity(compute_engine).value(), Some(&60.0));
+        assert_eq!(gpu.activity(|_| true).value(), Some(&90.0));
+        gpu.engines = Reading::Value(vec![engine("1", "Compute 7", Reading::Value(0.0))]);
+        assert_eq!(gpu.activity(compute_engine).value(), Some(&0.0));
+        assert!(matches!(
+            gpu.activity(three_d_engine),
+            Reading::Unsupported(_)
+        ));
+        gpu.engines = Reading::Value(vec![
+            engine("1", "Compute 7", Reading::Value(60.0)),
+            engine("2", "Compute 8", Reading::Unavailable("lost".into())),
+        ]);
+        assert!(gpu.activity(compute_engine).value().is_none());
+        assert!(gpu.activity(|_| true).value().is_none());
     }
 }
