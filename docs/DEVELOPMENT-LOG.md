@@ -23,6 +23,14 @@ nine-test, Clippy, release and native-window verification remains applicable.
 Publication checks cover ZIP contents/hash, public anonymous repository/download
 access, exact local/GitHub commit parity and clean working-tree status.
 
+Publication completed: repository visibility is public, Issues are enabled and
+v0.1.0 is a downloadable prerelease. Anonymous repository and release-page
+requests returned HTTP 200. Downloaded the ZIP without authentication and
+confirmed its SHA256 matches the local archive; every one of its 322 file
+entries also matched the prepared folder. Release tag targets publication
+commit `57eda7fd772fbe6207b6f30c016e5c12e96732fd`. This final documentation
+entry records the completed checks; the application binary is unchanged.
+
 ## 10 October 2026 — Optional always-on-top window
 
 Added a sidebar checkbox using egui's native window-level command so the

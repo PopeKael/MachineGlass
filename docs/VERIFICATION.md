@@ -22,6 +22,17 @@ marked as an early prerelease. ZIP entry/content verification and anonymous
 GitHub repository/release/download checks are required at publication; raw
 results remain local under `verification/`.
 
+Publication completed and independently checked without authentication:
+repository and release pages returned HTTP 200; the GitHub API reported public
+visibility and Issues enabled. v0.1.0 is a published prerelease with the ZIP and
+checksum assets, targeting commit `57eda7fd772fbe6207b6f30c016e5c12e96732fd`.
+All 322 ZIP file entries matched the prepared folder byte-for-byte. The anonymous
+download matched local archive SHA256
+`49D2FEF055EC2A0E261836FD3B283C7B51C4FC47A3F44981286A9BE51D0CA1BB`.
+Local/GitHub main parity and clean status passed after publication; checked again
+after committing this completion record. Raw result: local
+`verification/publication-check.json`.
+
 ## 10 October 2026 — Always-on-top option
 
 - `cargo fmt`, `cargo test --locked` (nine tests),
