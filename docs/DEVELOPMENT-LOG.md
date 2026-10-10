@@ -6,6 +6,24 @@ findings as well as features; distinguish a successful observation from a
 proven fix. Keep raw logs, inventory and captures local under `verification/`.
 Detailed measurement evidence belongs in [verification](VERIFICATION.md).
 
+## 10 October 2026 — Optional always-on-top window
+
+Added a sidebar checkbox using egui's native window-level command so the
+monitor can remain visible while another application has focus. Clearing the
+checkbox restores normal stacking. The option starts off and lasts for the
+current application session, including tray hiding/restoring. Telemetry and
+the compact dashboard layout are unchanged.
+
+Validation: formatting, nine locked tests, Clippy with warnings denied and
+release build passed. Inspected the actual portable native UI; read-only Win32
+observations confirmed topmost enabled with Opera focused, and topmost cleared
+after disabling. Updated the portable build. Detailed evidence is recorded in
+VERIFICATION.md. User accepted the result and requested this GitHub checkpoint.
+Reviewed the four changed source/documentation files; private runtime evidence
+and packaged binaries remain ignored. The preceding validation applies to this
+unchanged implementation. Commit and push target the existing main branch;
+exact GitHub-tip parity and clean working-tree status are checked afterward.
+
 ## 9 October 2026 — GPU telemetry and compact dashboard checkpoint
 
 User accepted the compact display and requested a GitHub checkpoint. Reviewed

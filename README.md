@@ -25,6 +25,11 @@ The current renderer requires a working OpenGL 3.3 graphics driver; renderer
 failure is logged. Compatibility with older / remote-session GPUs is still a
 proof-of-concept question.
 
+Select **Always on top** in the left sidebar to keep MachineGlass above other
+normal windows while another application has focus. Clear it to restore normal
+window stacking. This option applies for the current session and starts off
+when the application is relaunched.
+
 ## Available now
 
 - Live total CPU, physical RAM used / available, uptime and process count.

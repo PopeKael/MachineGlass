@@ -39,6 +39,7 @@ struct MachineGlass {
     capture: Option<PathBuf>,
     capture_requested: bool,
     quit_observed: bool,
+    always_on_top: bool,
 }
 
 fn bytes(v: u64) -> String {
@@ -100,6 +101,7 @@ impl MachineGlass {
             capture,
             capture_requested: false,
             quit_observed: false,
+            always_on_top: false,
         }
     }
 
@@ -711,7 +713,21 @@ impl eframe::App for MachineGlass {
                         self.page = page;
                     }
                 }
-                ui.add_space(25.0);
+                ui.add_space(15.0);
+                if ui
+                    .checkbox(&mut self.always_on_top, "Always on top")
+                    .on_hover_text("Keep MachineGlass above other windows while they have focus. Applies for this session.")
+                    .changed()
+                {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+                        if self.always_on_top {
+                            egui::WindowLevel::AlwaysOnTop
+                        } else {
+                            egui::WindowLevel::Normal
+                        },
+                    ));
+                }
+                ui.add_space(10.0);
                 ui.separator();
                 ui.label(
                     RichText::new("NATIVE WINDOWS\nOFFLINE\nNO ELEVATION")

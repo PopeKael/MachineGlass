@@ -2,6 +2,28 @@
 
 This is a Milestone 1 proof of concept, verified on the current Windows desktop.
 
+## 10 October 2026 — Always-on-top option
+
+- `cargo fmt`, `cargo test --locked` (nine tests),
+  `cargo clippy --all-targets --locked -- -D warnings` and
+  `cargo build --release --locked` passed.
+- Updated and launched `dist/MachineGlass/MachineGlass.exe`; actual native
+  rendering showed the new checkbox below the sidebar navigation and all seven
+  graphlets at the existing default size.
+- Initial state: topmost false, Opera foreground above MachineGlass. After
+  checking the option: `WS_EX_TOPMOST` true, foreground HWND 197170 (Opera),
+  MachineGlass HWND 134068 unfocused and above the foreground window in native
+  z-order. Screenshot also showed its inactive title bar and checked option.
+- Clearing the checkbox removed `WS_EX_TOPMOST`; checked it again for use.
+  Read-only window-state evidence is local under `verification/pin-*.json`.
+  Browser activation via Computer Use timed out on app approval; the observed
+  foreground and z-order comparison confirms the result independently.
+- Option uses `ViewportCommand::WindowLevel` on change only, defaults off on
+  relaunch, and adds no collector or polling loop. Tray round-trip retention was
+  not separately exercised in this check. No new overhead benchmark was run.
+- Portable and release executable SHA256:
+  `CA1F277F544CB5D92153EBFB099C0096C86C95DE62A5BD36023A5C20ED94346E`.
+
 ## Build and correctness
 
 - `cargo test --locked`: four tests passed. CPU deltas, missing/reset counters,
