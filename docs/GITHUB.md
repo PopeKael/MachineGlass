@@ -1,10 +1,12 @@
-# Private GitHub source repository
+# Public GitHub source repository
 
 Repository: https://github.com/PopeKael/MachineGlass
 
 MachineGlass's application source, build scripts, original icon assets, product
 documentation, licence notices and MIT licence are stored here. The repository
-is private. Only the owner and explicitly authorized collaborators can access it.
+is public following the owner's publication decision on 10 October 2026.
+The first public preview is v0.1.0, with a portable Windows x64 ZIP in Releases.
+Feedback and bug reports are welcome in GitHub Issues.
 
 Local `main` tracks `origin/main` on GitHub. A checkpoint means reviewing and
 committing the intended source changes, pushing them, and verifying identical
@@ -26,7 +28,10 @@ Do not commit `target/`, `dist/`, `verification/`, logs, machine inventories or
 credentials. The generated icon assets are intentional source assets; the
 compiled application executable is not.
 
-Keep repository visibility private until explicitly instructed otherwise.
+The owner authorized public visibility and distribution of the verified portable
+build. Keep raw local evidence and runtime data out of source and release assets.
+Release ZIPs include the executable, README, documentation, MIT licence and
+third-party/font notices. No separately installed runtime is required.
 MIT allows reuse with the copyright and licence notice retained. It does not
 require public source publication. Third-party components keep their own licences.
 

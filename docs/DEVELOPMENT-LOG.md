@@ -6,6 +6,23 @@ findings as well as features; distinguish a successful observation from a
 proven fix. Keep raw logs, inventory and captures local under `verification/`.
 Detailed measurement evidence belongs in [verification](VERIFICATION.md).
 
+## 10 October 2026 — First public preview
+
+User accepted the utility for everyday AI-workload monitoring and authorized
+public GitHub visibility. Reframed the README around this modest, working use
+case: compact CPU/RAM/GPU graphs, GPU memory and optional always-on-top display.
+The original broader brief remains historical design context, not a promise of
+future features. Feedback is invited through GitHub Issues.
+
+Prepared v0.1.0 as an unsigned portable Windows x64 preview with the already
+verified release executable and all dependency/font notices. Reviewed tracked
+file paths across all 14 existing commits and scanned history for common secret
+patterns (no matches). Raw captures, private runtime evidence and generated
+binaries remain excluded from Git. No application code changed; the preceding
+nine-test, Clippy, release and native-window verification remains applicable.
+Publication checks cover ZIP contents/hash, public anonymous repository/download
+access, exact local/GitHub commit parity and clean working-tree status.
+
 ## 10 October 2026 — Optional always-on-top window
 
 Added a sidebar checkbox using egui's native window-level command so the

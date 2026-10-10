@@ -2,6 +2,26 @@
 
 This is a Milestone 1 proof of concept, verified on the current Windows desktop.
 
+## 10 October 2026 — Public preview preparation
+
+Owner authorized public source and portable distribution. Documentation-only
+publication changes reuse the native release verified below; no application
+code or dependency changed. Source history comprised 14 commits before the
+publication commit. Reviewed historical file paths and scanned all reachable
+commits for common GitHub/AWS token, private-key and API-key assignment patterns;
+no matches. This is a targeted review, not a guarantee from a dedicated secret
+scanner. No raw inventories, logs or captures are tracked.
+
+The portable folder contains 322 files: the verified executable, README, MIT
+licence, project documentation, dependency inventory and third-party/font
+licence texts. Checked for unexpected runtime/config/probe files; none found.
+The executable SHA256 remains
+`CA1F277F544CB5D92153EBFB099C0096C86C95DE62A5BD36023A5C20ED94346E`.
+Distribute as `MachineGlass-0.1.0-windows-x64.zip` with a separate SHA256 file,
+marked as an early prerelease. ZIP entry/content verification and anonymous
+GitHub repository/release/download checks are required at publication; raw
+results remain local under `verification/`.
+
 ## 10 October 2026 — Always-on-top option
 
 - `cargo fmt`, `cargo test --locked` (nine tests),
