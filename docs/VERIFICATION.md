@@ -2,6 +2,154 @@
 
 This is a Milestone 1 proof of concept, verified on the current Windows desktop.
 
+## 14 October 2026 — Cached refresh stability and unreadable diagnostics
+
+- Root cause: during a cached refresh, directory size totals were rebuilt from
+  only currently encountered files. As the worker descended, cached totals
+  could drop and then grow again even with no filesystem changes. The scan now
+  retains cached totals as estimates and applies size deltas for changed,
+  newly found, or removed children. Per-directory small-file aggregates update
+  once that directory has been enumerated.
+- A complete scan compares a deterministic fingerprint of its accepted cache
+  snapshot and resulting tree. The UI says `Scan complete · no changes` when
+  they match, and `Scan complete · map updated` when they differ. The cache is
+  still atomically rewritten after a successful non-cancelled pass. A pass with
+  unreadable locations does not claim “no changes,” because cached data may
+  have been retained below those locations.
+- Cache logs include drive, volume identity/capacity, cache path, hit/miss or
+  mismatch reason, entry count and save result. Scan logs include duration,
+  completion/cancellation, unreadable count and whether the map changed.
+  Unreadable logs capture path, operation, and Windows I/O error text. The UI
+  hover popup shows up to eight unique path/reason pairs and notes any remainder.
+- Regression test: first scan a temporary tree with both small and large files,
+  load its cache, scan it again unchanged, then verify root total is stable,
+  cache fingerprints match, and completion reports no changes.
+- `cargo fmt --all -- --check` — passed. `cargo test --locked` — passed (14
+  library tests and one UI layout test). `cargo clippy --all-targets --locked
+  -- -D warnings` — passed after running with permission to read Clippy's
+  user-level configuration. `cargo build --release --locked` — passed.
+- The packaged release executable launched with the Storage page selected.
+  `verification/storage-diagnostics-native.bmp` is the captured and inspected
+  native 944x720 initial Storage page. The unreadable hover popup was not
+  visually captured; its path/reason data is covered by the scanner model and
+  its egui hover construction compiled, but native hover interaction remains
+  unverified in this session.
+- `dist\MachineGlass\MachineGlass.exe` was refreshed after the in-use copy
+  closed. SHA256 matches `target\release\MachineGlass.exe`:
+  `1997E313513D5F77DF12BA4694B1830D40789B63B9DFE100E64D9A0184343F55`.
+
+## 14 October 2026 — Progressive Storage view
+
+### Implemented
+
+- `src/storage.rs` enumerates logical fixed/removable drives with
+  `GetLogicalDrives` / `GetDriveTypeW`, and captures total/free volume bytes
+  with `GetDiskFreeSpaceExW`. Each selected volume is scanned on a named Rust
+  worker. A bounded sync channel streams top-level entries, then descendants
+  in batches, with coalesced cumulative directory-size updates.
+  `StorageSession` applies events to `StorageTree`; the egui renderer reads
+  only the tree model and its maintained parent index.
+- Cancellation is cooperative and does not join a potentially blocked
+  filesystem call on the UI thread. Unreadable directory/metadata entries are
+  counted, and the scan continues. `DirEntry::metadata()` preserves link
+  metadata and reuses the directory enumeration data on Windows. The Windows
+  reparse-point attribute prevents descending into junctions, symlinks, mount
+  points, or other reparse entries. Worker-start failures are surfaced in the
+  UI; cancellation before the worker's first entry is still reported as
+  cancelled.
+- The root treemap uses the fixed volume total as its area denominator. The
+  remaining tile shows free space plus bytes not yet mapped; its label is
+  backed by the separate real free-space figure shown in the page header.
+  Directory rectangles update and subdivide as cumulative logical sizes arrive.
+  Files smaller than 512 KiB are grouped per directory; more than 80 visible
+  children are represented by the largest 79 plus a remainder tile. Treemap
+  descent draws at most eight nested levels per view; directories can still be
+  selected and opened as the new view root.
+- Open in Explorer targets the hovered real file/directory, or the selected
+  directory when there is no hovered real item. Synthetic aggregate/remainder
+  tiles are not sent to Explorer.
+- Directories now use squarified area placement, so sibling size differences
+  form proportional blocks rather than the long strips in the user screenshots.
+  Stable directory colors and same-color child files make folder containment
+  easier to read. The renderer uses a maintained parent index and only sorts
+  the largest visible children for each drawn folder.
+- Per-volume JSON snapshots live in `%LOCALAPPDATA%\MachineGlass\storage`.
+  The worker accepts a snapshot only when schema, root, volume serial and total
+  capacity match. It streams cached entries before live results, prunes cached
+  children after successful directory enumeration, and retains cached children
+  for inaccessible/incomplete directories. A complete, non-cancelled scan
+  writes a temporary file and atomically replaces the snapshot. Snapshot files
+  over 64 MiB are ignored. This is stale-while-refresh display; it does not
+  skip the full filesystem walk or use USN Journal data.
+- The Windows scan hot path now batches up to 128 discoveries or about 75 ms,
+  coalesces directory-total updates, and uses `DirEntry::metadata()` to reuse
+  enumeration metadata. This removes avoidable per-item channel, path-lookup,
+  and repeated-index work. No before/after full-volume timing is available yet.
+
+### Native observations
+
+- Release framebuffer `verification/storage-capacity-native.bmp` was captured
+  with C: selected while scanning continued. It showed a 464.34 GiB total,
+  199.13 GiB free, 31.65 GiB discovered, and a 432.69 GiB “Free + not yet
+  mapped” area. The pagefile rectangle occupied approximately 6.8% of the full
+  drive frame (31.65 / 464.34), instead of filling the discovered-only map.
+  The capture reported 5,554 discovered entries and one unreadable path while
+  the scan was still active.
+- `verification/storage-final.bmp` is the native 640x480 client capture after
+  shrinking the window. Navigation, Storage heading, drive picker, controls,
+  explanatory text, and map viewport fit. The rail is resizable from 96 to
+  180 px; the 640 px minimum client width leaves a responsive central region.
+- A prior native C: scan of the pre-capacity prototype reached 33,167 entries
+  without blocking the UI. It is not used as proof of the final map scale; the
+  fixed-capacity C: capture above is the relevant rendering evidence.
+- After the user's F: screenshots, launched the rebuilt portable package and
+  inspected its native F: rendering. At 13,229 discovered entries and two
+  unreadable paths, it showed nested, proportional folder blocks rather than
+  the previous full-width bands. It reported 607.01 GiB discovered of 931.50
+  GiB while scanning continued. This confirms progressive rendering, not a
+  complete-volume timing measurement.
+
+### Validation
+
+- `cargo fmt --all` — passed.
+- `cargo test --target-dir target\storage-tests --locked` — passed, 14 tests. The storage tests verify
+  top-level-before-descendant event ordering, cumulative root size, and normal
+  completion on a temporary tree with large files, cancellation, cache
+  round-tripping and volume identity, and stale-subtree reconciliation. A UI
+  layout test verifies squarified area ratios and rectangle bounds.
+- `cargo clippy --all-targets --locked -- -D warnings` — passed.
+- `cargo build --release --locked` — passed. The standard generated release
+  executable was rebuilt after closing the temporary native verification
+  instance that held its previous image open. A separate fresh-target build
+  also passed.
+
+### Limits and presentation debt
+
+- The observed C: scan was still running; a complete whole-volume pass and
+  long-duration responsiveness were not measured. Cancelling is cooperative;
+  a worker inside a blocking filesystem operation may finish that call before
+  it observes cancellation, but it never blocks the UI thread.
+- Sizes are logical file lengths, not allocated clusters. Sparse/compressed
+  files and hard links can make the sum differ from physically occupied disk
+  space. Hard links are currently counted once per encountered path. The
+  remainder tile combines actual free bytes with unscanned file bytes, so it
+  must not be read as a single measured category.
+- Reparse points are deliberately not followed. Their target contents are not
+  included through that path. Access denied and disappearing entries are
+  counted as unreadable and omitted, not reported as zero-size measurements.
+- If the volume capacity API fails, the root map clearly reports that its scale
+  is unavailable rather than filling the view with discovered-only sizes.
+  Header/status wrapping at still smaller widths, DPI variants, and scan cost
+  on very large volumes need additional presentation/runtime work.
+- The cache improves first display on repeat scans; scan-time reduction from
+  reusing cache entries is not yet implemented. It does not skip directories.
+  USN Journal optimization, deletion, cleanup, and filesystem-changing actions
+  remain excluded. Explorer opening is the only external process launch.
+- The native F: pass was still active at the 13,229-entry rendering check, and
+  no completed F: snapshot was written during this verification. Cache file
+  round-trip and volume-identity behavior passed in the isolated storage test;
+  a second live F: launch showing cached-first refresh remains unverified.
+
 ## 10 October 2026 — Public preview preparation
 
 Owner authorized public source and portable distribution. Documentation-only

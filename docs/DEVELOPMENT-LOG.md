@@ -6,6 +6,99 @@ findings as well as features; distinguish a successful observation from a
 proven fix. Keep raw logs, inventory and captures local under `verification/`.
 Detailed measurement evidence belongs in [verification](VERIFICATION.md).
 
+## 14 October 2026 — Storage refresh diagnostics and stable cached sizing
+
+The user observed cached F: treemap boxes changing during a repeat scan despite
+no known filesystem changes. The refresh had been rebuilding directory totals
+from only the bytes found so far, making cached totals temporarily collapse
+before the worker reached deeper descendants. Directory totals now start from
+the cached estimate and adjust by discovered file/aggregate deltas; unchanged
+refreshes preserve the displayed proportions. Small-file group sizes are
+committed after their directory enumeration so the cached group does not shrink
+to a partial count. Completed scans compare a stable fingerprint of the old and
+new tree and report “Scan complete · no changes” when equal. If any locations
+were unreadable, the scan reports that explicitly and does not claim the map
+was unchanged because cached data may have been retained below those locations.
+
+Storage diagnostics now log cache hit/miss and identity-rejection reasons,
+scan start/completion, cache-save outcome, and each unreadable path, operation,
+and OS error. Hovering the unreadable count displays the paths and reasons
+(first eight, plus a remainder count). This distinguishes access denial,
+enumeration failures, metadata failures, and transient filesystem errors
+without interpreting hidden/system attributes.
+
+**Verification:** An added repeat-scan regression fixture includes nested and
+small files; it verifies stable directory totals, identical cache fingerprints,
+and the no-changes result. All 15 locked tests, formatting, all-target Clippy
+with warnings denied, and the optimized Windows release build passed. Captured
+and inspected the actual release Storage page at its initial drive-selection
+state. The unreadable hover popup was not visually captured. The existing
+`dist\MachineGlass` package was refreshed after its running copy closed; its
+executable SHA256 matches the release build.
+
+## 14 October 2026 — Progressive Storage map
+
+Added the first native Storage page. Drive enumeration and volume capacity/free
+space use Windows APIs; directory enumeration uses a cancellable Rust worker,
+a bounded message channel, and a normalized `StorageTree`. The UI polls the
+session and paints the current tree on the egui thread. It shows the root
+treemap against the drive's fixed total capacity, with a neutral “Free + not
+yet mapped” remainder. Directories subdivide as their discovered sizes grow;
+files below 512 KiB are grouped per directory and excess visible items are
+grouped for drawing. The view supports directory drill-in/parent navigation,
+hover path/size, and opening the selected/hovered location in Explorer.
+
+The first native C: rendering showed why a discovered-only treemap was wrong:
+`pagefile.sys` temporarily occupied almost the whole map. The corrected map
+uses actual volume capacity/free-space readings, so each new discovery grows
+inside a stable volume frame. C: was observed at 464.34 GiB total and 199.13
+GiB free; while still scanning, 5,554 entries represented 31.65 GiB discovered
+and 432.69 GiB remained in the combined free/not-yet-mapped tile. One unreadable
+path was reported without stopping collection. A 640x480 client capture showed
+the Storage controls and map area remain usable at the reduced minimum.
+
+Reduced the minimum client size from 832x640 to 640x480 and changed the fixed
+156 px navigation rail into a resizable 96–180 px rail with width-filling
+buttons. Existing typography and colors are preserved. No telemetry/provider
+code or unrelated architecture changed, and no dependency was added.
+
+Formatting, all 14 locked tests, all-target Clippy with warnings denied, and an
+optimized Windows release build passed. The storage test verifies that
+  top-level items are reported before nested files, cumulative directory sizes
+  arrive, cancellation is reported, and the scan emits completion. Native C: rendering remained
+progressive and the window stayed responsive while more than 5,000 entries
+were reported. Detailed captures, dimensions, Windows edge cases, and
+limitations are in [VERIFICATION](VERIFICATION.md).
+
+**Still open:** observed C: scanning was in progress, not a verified complete
+whole-volume inventory. File `metadata.len()` is logical length; sparse or
+compressed allocation and hard links can make the treemap differ from actual
+physical usage. The remainder intentionally combines actual free space with
+items not yet mapped. Reparse points (including junctions and mount points) are
+shown without descending into them to avoid loops/duplicate traversal.
+Extremely deep trees can be drilled into, while drawing is capped at eight
+nested levels and 80 direct items plus an aggregate tile. Broader responsive
+polish for the header/status strip, DPI testing, and sustained scans remain
+presentation/runtime follow-up work.
+
+The first user review showed long bands of similarly sized tiles in deep
+folders. The renderer now uses squarified area placement, stable folder colors,
+and keeps file tiles in their parent folder's color. Scan events are coalesced
+into batches, cumulative directory sizes are emitted periodically, and the UI
+maintains a parent index instead of rebuilding it from every path each frame.
+On Windows, `DirEntry::metadata()` reuses enumeration metadata and avoids the
+extra path lookup made by the first scanner.
+
+Added per-volume snapshots under `%LOCALAPPDATA%\MachineGlass\storage`. A
+snapshot is loaded in the worker and shown while the live scan refreshes it;
+drive root, volume serial and capacity must match. Completed directories prune
+stale cached children, while inaccessible/incomplete directories retain their
+cached subtrees. Only a non-cancelled scan atomically replaces the snapshot.
+This improves repeat-launch first paint. The live pass still walks the full
+tree; no USN Journal or timestamp-based scan skipping is used. Software-side
+event and metadata overhead is reduced, but a comparative full-volume timing
+against SpaceMonger has not yet been measured.
+
 ## 10 October 2026 — First public preview
 
 User accepted the utility for everyday AI-workload monitoring and authorized

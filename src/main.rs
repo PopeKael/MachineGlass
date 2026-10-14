@@ -5,9 +5,14 @@ use machineglass::{
     config::{self, Config},
     engine::Engine,
     model::*,
+    storage::{self, Drive, Entry, StorageSession},
     tray::{self, Tray},
 };
-use std::{path::PathBuf, time::Duration};
+use std::collections::HashMap;
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 const ACCENT: Color32 = Color32::from_rgb(63, 213, 183);
 const BLUE: Color32 = Color32::from_rgb(98, 167, 244);
@@ -18,6 +23,7 @@ enum Page {
     Overview,
     Processes,
     Instrument,
+    Storage,
 }
 #[derive(Clone, Copy, PartialEq)]
 enum Sort {
@@ -40,6 +46,12 @@ struct MachineGlass {
     capture_requested: bool,
     quit_observed: bool,
     always_on_top: bool,
+    drives: Vec<Drive>,
+    drive_index: Option<usize>,
+    storage_session: Option<StorageSession>,
+    storage_root: Option<PathBuf>,
+    storage_selected: Option<PathBuf>,
+    storage_hovered: Option<PathBuf>,
 }
 
 fn bytes(v: u64) -> String {
@@ -47,6 +59,15 @@ fn bytes(v: u64) -> String {
         format!("{:.2} GiB", v as f64 / (1u64 << 30) as f64)
     } else {
         format!("{:.1} MiB", v as f64 / (1u64 << 20) as f64)
+    }
+}
+fn compact_bytes(v: u64) -> String {
+    if v >= 1 << 30 {
+        format!("{:.1}G", v as f64 / (1u64 << 30) as f64)
+    } else if v >= 1 << 20 {
+        format!("{:.0}M", v as f64 / (1u64 << 20) as f64)
+    } else {
+        format!("{:.0}K", v as f64 / 1024.0)
     }
 }
 fn percent(r: &Reading<f64>) -> String {
@@ -61,6 +82,262 @@ fn memory_value(r: &Reading<u64>) -> String {
     r.value()
         .map(|v| bytes(*v))
         .unwrap_or_else(|| "Unavailable".into())
+}
+
+fn storage_color(index: usize) -> Color32 {
+    const COLORS: [Color32; 8] = [
+        Color32::from_rgb(36, 112, 113),
+        Color32::from_rgb(52, 89, 132),
+        Color32::from_rgb(112, 91, 46),
+        Color32::from_rgb(94, 70, 119),
+        Color32::from_rgb(42, 113, 85),
+        Color32::from_rgb(130, 74, 70),
+        Color32::from_rgb(52, 105, 115),
+        Color32::from_rgb(105, 100, 55),
+    ];
+    COLORS[index % COLORS.len()]
+}
+
+struct StorageDraw<'a> {
+    children: &'a HashMap<PathBuf, Vec<PathBuf>>,
+    entries: &'a HashMap<PathBuf, Entry>,
+    hovered: Option<PathBuf>,
+    selected: &'a mut Option<PathBuf>,
+    capacity: Option<u64>,
+}
+
+impl StorageDraw<'_> {
+    fn draw(
+        &mut self,
+        ui: &mut egui::Ui,
+        parent: &Path,
+        rect: egui::Rect,
+        depth: usize,
+        parent_color: Color32,
+    ) {
+        if depth >= 8 || rect.width() < 14.0 || rect.height() < 14.0 {
+            return;
+        }
+        let mut children: Vec<&Entry> = self
+            .children
+            .get(parent)
+            .into_iter()
+            .flatten()
+            .filter_map(|path| self.entries.get(path))
+            .collect();
+        if children.is_empty() {
+            return;
+        }
+        let total_discovered = children.iter().map(|entry| entry.size).sum::<u64>();
+        let mut remainder_size = 0;
+        let mut remainder_count = 0;
+        if children.len() > 79 {
+            children.select_nth_unstable_by(79, |a, b| b.size.cmp(&a.size));
+            remainder_size = children[79..].iter().map(|entry| entry.size).sum();
+            remainder_count = children.len() - 79;
+            children.truncate(79);
+        }
+        children.sort_by_key(|entry| std::cmp::Reverse(entry.size));
+        let mut visible: Vec<Entry> = children.into_iter().cloned().collect();
+        if remainder_count > 0 {
+            visible.push(Entry {
+                path: parent.join(".machineglass-other-entries"),
+                parent: parent.to_path_buf(),
+                name: "Other discovered items".into(),
+                is_dir: false,
+                size: remainder_size,
+                aggregate_count: remainder_count as u64,
+                aggregate: true,
+                unmapped: false,
+            });
+        }
+        if depth == 0
+            && let Some(capacity) = self.capacity
+            && capacity > total_discovered
+        {
+            visible.push(Entry {
+                path: parent.join(".machineglass-unmapped-space"),
+                parent: parent.to_path_buf(),
+                name: "Free + not yet mapped".into(),
+                is_dir: false,
+                size: capacity - total_discovered,
+                aggregate_count: 0,
+                aggregate: false,
+                unmapped: true,
+            });
+        }
+        visible.retain(|entry| entry.size > 0);
+        let layout = squarified_layout(&visible, rect);
+        for (entry, piece) in visible.iter().zip(layout) {
+            let piece = piece.shrink(1.0);
+            let fill = if entry.unmapped {
+                Color32::from_rgb(29, 39, 51)
+            } else if entry.is_dir {
+                storage_color(path_color_index(&entry.path))
+            } else {
+                parent_color
+            };
+            let painter = ui.painter();
+            painter.rect_filled(piece, 2.0, fill);
+            painter.rect_stroke(
+                piece,
+                2.0,
+                egui::Stroke::new(1.0_f32, Color32::from_rgb(12, 18, 26)),
+                egui::StrokeKind::Inside,
+            );
+            let response = ui.interact(
+                piece,
+                egui::Id::new(("storage", &entry.path)),
+                egui::Sense::click(),
+            );
+            if response.hovered() {
+                self.hovered = Some(entry.path.clone());
+            }
+            if response.clicked() && entry.is_dir {
+                *self.selected = Some(entry.path.clone());
+            }
+            if piece.width() > 80.0 && piece.height() > 36.0 {
+                let title = if entry.unmapped {
+                    format!("{} · {}", entry.name, bytes(entry.size))
+                } else if entry.aggregate {
+                    format!("{} ({} items)", entry.name, entry.aggregate_count)
+                } else {
+                    entry.name.clone()
+                };
+                painter.text(
+                    piece.left_top() + egui::vec2(5.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    title,
+                    egui::FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+                if !entry.unmapped {
+                    painter.text(
+                        piece.left_bottom() + egui::vec2(5.0, -4.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        bytes(entry.size),
+                        egui::FontId::proportional(10.0),
+                        Color32::WHITE,
+                    );
+                }
+            } else if !entry.unmapped && piece.width() >= 28.0 && piece.height() >= 70.0 {
+                let compact_name: String = entry.name.chars().take(6).collect();
+                painter.text(
+                    piece.center_top() + egui::vec2(0.0, 4.0),
+                    egui::Align2::CENTER_TOP,
+                    compact_name,
+                    egui::FontId::proportional(9.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    piece.center_bottom() - egui::vec2(0.0, 4.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    compact_bytes(entry.size),
+                    egui::FontId::proportional(9.0),
+                    Color32::WHITE,
+                );
+            }
+            if entry.is_dir && piece.width() > 34.0 && piece.height() > 34.0 {
+                let nested = egui::Rect::from_min_max(
+                    piece.min + egui::vec2(1.0, 20.0),
+                    piece.max - egui::vec2(1.0, 1.0),
+                );
+                self.draw(ui, &entry.path, nested, depth + 1, fill);
+            }
+        }
+    }
+}
+
+fn path_color_index(path: &Path) -> usize {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in path.to_string_lossy().to_ascii_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash as usize
+}
+
+fn squarified_layout(entries: &[Entry], bounds: egui::Rect) -> Vec<egui::Rect> {
+    let total = entries
+        .iter()
+        .map(|entry| entry.size.max(1) as f64)
+        .sum::<f64>();
+    if total <= 0.0 || bounds.is_negative() || entries.is_empty() {
+        return Vec::new();
+    }
+    let area = f64::from(bounds.width()) * f64::from(bounds.height());
+    let mut remaining: Vec<(usize, f64)> = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (index, area * entry.size.max(1) as f64 / total))
+        .collect();
+    let mut layout = vec![egui::Rect::NOTHING; entries.len()];
+    let mut frame = bounds;
+    while !remaining.is_empty() && frame.width() > 0.0 && frame.height() > 0.0 {
+        let short_side = f64::from(frame.width().min(frame.height()));
+        let mut row = Vec::new();
+        while let Some(next) = remaining.first().copied() {
+            let current_worst = squarify_worst(&row, short_side);
+            row.push(next);
+            if !remaining.is_empty() && squarify_worst(&row, short_side) > current_worst {
+                row.pop();
+                break;
+            }
+            remaining.remove(0);
+        }
+        if row.is_empty() {
+            row.push(remaining.remove(0));
+        }
+        let row_area = row.iter().map(|(_, item_area)| item_area).sum::<f64>();
+        if frame.width() >= frame.height() {
+            let strip_width = (row_area / f64::from(frame.height())) as f32;
+            let mut y = frame.top();
+            for (position, (index, item_area)) in row.iter().enumerate() {
+                let height = if position + 1 == row.len() {
+                    frame.bottom() - y
+                } else {
+                    (*item_area / f64::from(strip_width.max(0.001))) as f32
+                };
+                layout[*index] = egui::Rect::from_min_size(
+                    egui::pos2(frame.left(), y),
+                    egui::vec2(strip_width.min(frame.width()), height.max(0.0)),
+                );
+                y += height;
+            }
+            frame.min.x += strip_width.min(frame.width());
+        } else {
+            let strip_height = (row_area / f64::from(frame.width())) as f32;
+            let mut x = frame.left();
+            for (position, (index, item_area)) in row.iter().enumerate() {
+                let width = if position + 1 == row.len() {
+                    frame.right() - x
+                } else {
+                    (*item_area / f64::from(strip_height.max(0.001))) as f32
+                };
+                layout[*index] = egui::Rect::from_min_size(
+                    egui::pos2(x, frame.top()),
+                    egui::vec2(width.max(0.0), strip_height.min(frame.height())),
+                );
+                x += width;
+            }
+            frame.min.y += strip_height.min(frame.height());
+        }
+    }
+    layout
+}
+
+fn squarify_worst(row: &[(usize, f64)], short_side: f64) -> f64 {
+    if row.is_empty() || short_side <= 0.0 {
+        return f64::INFINITY;
+    }
+    let sum = row.iter().map(|(_, area)| area).sum::<f64>();
+    let min = row
+        .iter()
+        .map(|(_, area)| *area)
+        .fold(f64::INFINITY, f64::min);
+    let max = row.iter().map(|(_, area)| *area).fold(0.0, f64::max);
+    let side_squared = short_side * short_side;
+    (side_squared * max / (sum * sum)).max((sum * sum) / (side_squared * min))
 }
 
 impl MachineGlass {
@@ -102,6 +379,234 @@ impl MachineGlass {
             capture_requested: false,
             quit_observed: false,
             always_on_top: false,
+            drives: storage::local_drives(),
+            drive_index: None,
+            storage_session: None,
+            storage_root: None,
+            storage_selected: None,
+            storage_hovered: None,
+        }
+    }
+
+    fn start_storage_scan(&mut self) {
+        let Some(drive) = self.drive_index.and_then(|i| self.drives.get(i)).cloned() else {
+            return;
+        };
+        self.storage_session = None; // Cancels the prior worker without blocking egui.
+        self.storage_root = Some(drive.root.clone());
+        self.storage_selected = Some(drive.root.clone());
+        self.storage_session = Some(StorageSession::start(&drive));
+    }
+
+    fn storage(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Storage");
+        ui.label("Logical file sizes; small files grouped. The remaining area is free space plus items not yet mapped.");
+        let mut changed = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Drive");
+            let selected_text = self
+                .drive_index
+                .and_then(|i| self.drives.get(i))
+                .map(|d| d.label.as_str())
+                .unwrap_or("Select a local drive");
+            egui::ComboBox::from_id_salt("storage_drive")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for (index, drive) in self.drives.iter().enumerate() {
+                        if ui
+                            .selectable_value(&mut self.drive_index, Some(index), &drive.label)
+                            .clicked()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            if self
+                .storage_session
+                .as_ref()
+                .is_some_and(|session| session.tree().is_scanning())
+                && ui.button("Cancel scan").clicked()
+                && let Some(scan) = &self.storage_session
+            {
+                scan.cancel();
+            }
+        });
+        if changed {
+            self.start_storage_scan();
+        }
+        if self.drives.is_empty() {
+            ui.colored_label(MUTED, "No fixed or removable local drives are available.");
+            return;
+        }
+        if self.storage_root.is_none() {
+            ui.label("Choose a drive to begin.");
+            return;
+        }
+        if let Some(session) = &mut self.storage_session {
+            session.poll();
+        }
+        let Some(session) = &self.storage_session else {
+            return;
+        };
+        let tree = session.tree();
+        let entries = tree.entries();
+        let root = self.storage_root.clone().unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            if let Some(selected) = &self.storage_selected {
+                if selected != &root && ui.button("← Parent").clicked() {
+                    self.storage_selected = selected
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .or(Some(root.clone()));
+                }
+                ui.label(
+                    self.storage_selected
+                        .as_deref()
+                        .unwrap_or(&root)
+                        .display()
+                        .to_string(),
+                );
+            }
+            let action_path = self
+                .storage_hovered
+                .as_ref()
+                .and_then(|path| entries.get(path))
+                .filter(|entry| !entry.aggregate && !entry.unmapped)
+                .map(|entry| entry.path.clone())
+                .or_else(|| self.storage_selected.clone());
+            if let Some(path) = action_path
+                && ui.button("Open in Explorer").clicked()
+                && let Err(error) = std::process::Command::new("explorer.exe").arg(path).spawn()
+            {
+                config::log(&format!(
+                    "Could not open storage location in Explorer: {error}"
+                ));
+            }
+            let count = tree.discovered_count();
+            ui.label(format!("{count} discovered entries"));
+            if tree.inaccessible_count() > 0 {
+                let response = ui.label(format!("{} unreadable", tree.inaccessible_count()));
+                response.on_hover_ui(|ui| {
+                    ui.heading("Unreadable items");
+                    ui.label("The scanner could not complete this filesystem operation:");
+                    let issues = tree.inaccessible_issues();
+                    for issue in issues.iter().take(8) {
+                        ui.separator();
+                        ui.label(issue.path.display().to_string());
+                        ui.label(format!("{}: {}", issue.operation, issue.reason));
+                    }
+                    if issues.len() > 8 {
+                        ui.label(format!("{} more unreadable items", issues.len() - 8));
+                    }
+                });
+            }
+            if tree.is_scanning() {
+                ui.label(if tree.has_cached_snapshot() {
+                    "Cached map · verifying…"
+                } else {
+                    "Scanning…"
+                });
+            } else if let Some(error) = tree.error() {
+                ui.colored_label(Color32::YELLOW, format!("Scan could not start: {error}"));
+            } else if let Some(cancelled) = tree.finished() {
+                ui.label(if cancelled {
+                    "Scan cancelled"
+                } else if tree.inaccessible_count() > 0 {
+                    "Scan complete · some locations unreadable"
+                } else if tree.changed() == Some(false) {
+                    "Scan complete · no changes"
+                } else if tree.changed() == Some(true) {
+                    "Scan complete · map updated"
+                } else {
+                    "Scan complete"
+                });
+            }
+        });
+        let selected = self.storage_selected.clone().unwrap_or(root.clone());
+        let size = tree.entry(&selected).map(|e| e.size).unwrap_or(0);
+        ui.label(format!(
+            "{} · {} discovered{}",
+            selected.display(),
+            bytes(size),
+            if selected == root {
+                let total = tree
+                    .total_bytes()
+                    .map(bytes)
+                    .unwrap_or_else(|| "unavailable".into());
+                let free = tree
+                    .free_bytes()
+                    .map(bytes)
+                    .unwrap_or_else(|| "unavailable".into());
+                format!(" · total {total} · free {free}")
+            } else {
+                String::new()
+            }
+        ));
+        let available = ui.available_size().max(egui::vec2(1.0, 1.0));
+        let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 4.0, Color32::from_rgb(12, 18, 26));
+        self.storage_hovered = None;
+        let has_children = tree
+            .children()
+            .get(&selected)
+            .is_some_and(|children| !children.is_empty());
+        let capacity = if selected == root {
+            tree.total_bytes()
+        } else {
+            None
+        };
+        if selected == root && capacity.is_none() {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Drive capacity unavailable; treemap scale unavailable",
+                egui::FontId::proportional(14.0),
+                MUTED,
+            );
+        } else if !has_children {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Waiting for directory entries…",
+                egui::FontId::proportional(14.0),
+                MUTED,
+            );
+        } else {
+            let mut drawing = StorageDraw {
+                children: tree.children(),
+                entries,
+                hovered: None,
+                selected: &mut self.storage_selected,
+                capacity,
+            };
+            drawing.draw(
+                ui,
+                &selected,
+                rect,
+                0,
+                storage_color(path_color_index(&selected)),
+            );
+            self.storage_hovered = drawing.hovered;
+            if let Some(path) = &self.storage_hovered
+                && let Some(entry) = entries.get(path)
+            {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                if entry.unmapped {
+                    ui.label(format!("{} · {}", entry.name, bytes(entry.size)));
+                } else {
+                    ui.label(format!(
+                        "{} · {}{}",
+                        entry.path.display(),
+                        bytes(entry.size),
+                        if entry.is_dir {
+                            " · directory"
+                        } else {
+                            " · file"
+                        }
+                    ));
+                }
+            }
         }
     }
 
@@ -694,18 +1199,21 @@ impl eframe::App for MachineGlass {
             });
         });
         egui::SidePanel::left("navigation")
-            .exact_width(156.0)
-            .resizable(false)
+            .default_width(136.0)
+            .min_width(96.0)
+            .max_width(180.0)
+            .resizable(true)
             .show(ctx, |ui| {
                 ui.add_space(20.0);
                 for (page, label) in [
                     (Page::Overview, "System overview"),
                     (Page::Processes, "Processes"),
                     (Page::Instrument, "The instrument"),
+                    (Page::Storage, "Storage"),
                 ] {
                     if ui
                         .add_sized(
-                            [132.0, 36.0],
+                            [ui.available_width(), 36.0],
                             egui::Button::new(label).selected(self.page == page),
                         )
                         .clicked()
@@ -769,6 +1277,7 @@ impl eframe::App for MachineGlass {
                     egui::ScrollArea::vertical().show(ui, |ui| match self.page {
                         Page::Overview => self.overview(ui, s, &history, &gpu_history),
                         Page::Instrument => self.instrument(ui, s, &history),
+                        Page::Storage => self.storage(ui),
                         Page::Processes => (),
                     });
                 }
@@ -797,7 +1306,17 @@ impl eframe::App for MachineGlass {
             });
         }
         // Repainting only on samples/input; periodic check exposes a stalled provider.
-        ctx.request_repaint_after(Duration::from_secs(1));
+        ctx.request_repaint_after(
+            if self
+                .storage_session
+                .as_ref()
+                .is_some_and(|session| session.tree().is_scanning())
+            {
+                Duration::from_millis(150)
+            } else {
+                Duration::from_secs(1)
+            },
+        );
     }
 }
 
@@ -843,6 +1362,7 @@ fn main() -> eframe::Result {
         .map_or(Page::Overview, |v| match v.as_ref() {
             "processes" => Page::Processes,
             "instrument" => Page::Instrument,
+            "storage" => Page::Storage,
             _ => Page::Overview,
         });
     let query = args
@@ -855,7 +1375,7 @@ fn main() -> eframe::Result {
             .with_title("MachineGlass")
             .with_icon(tray::window_icon())
             .with_inner_size([944.0, 720.0])
-            .with_min_inner_size([832.0, 640.0]),
+            .with_min_inner_size([640.0, 480.0]),
         renderer: eframe::Renderer::Glow,
         ..Default::default()
     };
@@ -869,4 +1389,40 @@ fn main() -> eframe::Result {
     }
     config::log("Native event loop returned; main exiting");
     result
+}
+
+#[cfg(test)]
+mod storage_layout_tests {
+    use super::*;
+
+    #[test]
+    fn squarified_layout_preserves_area_weights_and_bounds() {
+        let entries = [500, 300, 200]
+            .into_iter()
+            .enumerate()
+            .map(|(index, size)| Entry {
+                path: PathBuf::from(format!("F:\\{index}")),
+                parent: PathBuf::from("F:\\"),
+                name: index.to_string(),
+                is_dir: false,
+                size,
+                aggregate_count: 0,
+                aggregate: false,
+                unmapped: false,
+            })
+            .collect::<Vec<_>>();
+        let bounds = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(200.0, 100.0));
+        let pieces = squarified_layout(&entries, bounds);
+        assert_eq!(pieces.len(), entries.len());
+        for piece in &pieces {
+            assert!(piece.is_positive());
+            assert!(bounds.contains_rect(*piece));
+        }
+        let areas: Vec<_> = pieces
+            .iter()
+            .map(|piece| f64::from(piece.width()) * f64::from(piece.height()))
+            .collect();
+        assert!((areas[0] / areas[1] - 500.0 / 300.0).abs() < 0.02);
+        assert!((areas[1] / areas[2] - 300.0 / 200.0).abs() < 0.02);
+    }
 }
