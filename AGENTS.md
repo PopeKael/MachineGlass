@@ -16,6 +16,14 @@ of Ariadne and must remain a native Windows Rust desktop instrument.
 - Run `cargo fmt`, `cargo test --locked` and
   `cargo clippy --all-targets --locked -- -D warnings` for relevant code changes.
   Build release and verify actual native rendering for UI changes.
+- The user's shortcut launches `dist/MachineGlass/MachineGlass.exe`; treat
+  that exact package path as the authoritative executable for delivery and
+  native verification. Build from this checkout, refresh that package in place,
+  and verify its hash against the release build. Do not invent alternate
+  package/output directories or ask the user to test a different executable.
+  If the file is in use, prepare the current release and wait for it to close
+  before replacing it. Run native acceptance against the real user data path
+  when the sandbox redirects `LOCALAPPDATA`.
 - Preserve third-party licence / font notices with portable packages. Keep
   private runtime inventory and screenshot captures out of Git.
 - State what was measured, what was tested and what is still unimplemented.

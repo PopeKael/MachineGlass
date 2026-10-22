@@ -5,15 +5,15 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     fs::{self, File, OpenOptions},
+    hash::{Hash, Hasher},
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
-    hash::{Hash, Hasher},
 };
 
 #[derive(Clone, Debug)]
@@ -40,7 +40,10 @@ pub struct Entry {
 
 #[derive(Clone, Debug)]
 pub enum ScanEvent {
-    Cached(Vec<Entry>),
+    Cached {
+        entries: Vec<Entry>,
+        last_completed: Option<std::time::SystemTime>,
+    },
     Entries(Vec<Entry>),
     DirectoryFinished(PathBuf),
     Inaccessible(ScanIssue),
@@ -126,8 +129,9 @@ impl ScanHandle {
         let worker = thread::Builder::new()
             .name("machineglass-storage-scan".into())
             .spawn(move || {
+                set_storage_thread_low_priority();
                 let started = std::time::Instant::now();
-                let (cache_path, cached) = load_cache(&drive);
+                let (cache_path, cached, last_completed) = load_cache(&drive);
                 let cached_fingerprint = (!cached.is_empty()).then(|| entries_fingerprint(&cached));
                 crate::config::log(&format!(
                     "Storage scan starting drive={} volume_id={:?} total_bytes={:?} cached_entries={} cache={}",
@@ -138,7 +142,10 @@ impl ScanHandle {
                     cache_path.display()
                 ));
                 for chunk in cached.chunks(256) {
-                    if !send(&sender, ScanEvent::Cached(chunk.to_vec()), &thread_cancel) {
+                    if !send(&sender, ScanEvent::Cached {
+                        entries: chunk.to_vec(),
+                        last_completed,
+                    }, &thread_cancel) {
                         let _ = sender.try_send(ScanEvent::Finished {
                             cancelled: true,
                             changed: None,
@@ -147,11 +154,14 @@ impl ScanHandle {
                     }
                 }
                 scan(
-                    drive,
-                    cache_path,
-                    cached,
-                    cached_fingerprint,
-                    started,
+                    ScanPlan {
+                        drive,
+                        cache_path,
+                        cached,
+                        cached_completed_at: last_completed,
+                        cached_fingerprint,
+                        started,
+                    },
                     sender,
                     thread_cancel,
                 )
@@ -196,6 +206,7 @@ pub struct StorageTree {
     total_bytes: Option<u64>,
     free_bytes: Option<u64>,
     error: Option<String>,
+    render_prepared: bool,
 }
 
 impl StorageTree {
@@ -213,6 +224,9 @@ impl StorageTree {
     }
     pub fn discovered_count(&self) -> usize {
         self.entries.len()
+    }
+    pub fn render_prepared(&self) -> bool {
+        self.render_prepared
     }
     pub fn inaccessible_count(&self) -> usize {
         self.inaccessible_count
@@ -244,49 +258,106 @@ impl StorageTree {
 /// Owns acquisition and applies worker messages to the normalized tree. The UI
 /// only polls this session and renders `tree()`; it does not handle scan events.
 pub struct StorageSession {
-    scan: ScanHandle,
+    id: u64,
+    scan: Option<ScanHandle>,
     tree: StorageTree,
+    inventory: StorageTree,
+    last_completed: Option<std::time::SystemTime>,
 }
 
 impl StorageSession {
     pub fn start(drive: &Drive) -> Self {
+        let mut session = Self::empty(drive);
+        session.refresh(drive);
+        session
+    }
+
+    fn empty(drive: &Drive) -> Self {
         Self {
-            scan: ScanHandle::start(drive.clone()),
+            id: NEXT_STORAGE_SESSION_ID.fetch_add(1, Ordering::Relaxed),
+            scan: None,
             tree: StorageTree {
                 total_bytes: drive.total_bytes,
                 free_bytes: drive.free_bytes,
                 ..StorageTree::default()
             },
+            inventory: StorageTree::default(),
+            last_completed: None,
         }
     }
 
+    fn apply_cached(&mut self, entries: Vec<Entry>) {
+        self.inventory.cache_loaded = true;
+        for entry in entries {
+            self.inventory.insert(entry, true);
+        }
+    }
+
+    fn apply_snapshot(&mut self, tree: StorageTree) {
+        self.tree = tree;
+        self.tree.cache_loaded = !self.tree.entries.is_empty();
+    }
+
+    fn refresh(&mut self, drive: &Drive) {
+        crate::config::log(&format!(
+            "Storage refresh start drive={} session_id={} existing_inventory_entries={} render_snapshot_nodes={} cached_render_snapshot={}",
+            drive.label,
+            self.id,
+            self.inventory.discovered_count(),
+            self.tree.discovered_count(),
+            self.tree.has_cached_snapshot()
+        ));
+        if let Some(scan) = &self.scan {
+            scan.cancel();
+        }
+        self.tree.finished = None;
+        self.tree.changed = None;
+        self.tree.error = None;
+        self.tree.issues.clear();
+        self.tree.inaccessible_count = 0;
+        self.tree.total_bytes = drive.total_bytes;
+        self.tree.free_bytes = drive.free_bytes;
+        self.scan = Some(ScanHandle::start(drive.clone()));
+    }
+
     pub fn poll(&mut self) {
+        let Some(scan) = &self.scan else {
+            return;
+        };
         let mut entries_applied = 0usize;
         while entries_applied < 8192 {
-            let Ok(event) = self.scan.receiver.try_recv() else {
+            let Ok(event) = scan.receiver.try_recv() else {
                 break;
             };
             match event {
-                ScanEvent::Cached(entries) => {
-                    self.tree.cache_loaded = true;
+                ScanEvent::Cached {
+                    entries,
+                    last_completed,
+                } => {
+                    self.inventory.cache_loaded = true;
+                    if last_completed.is_some() {
+                        self.last_completed = last_completed;
+                    }
                     for entry in entries {
-                        self.tree.insert(entry, true);
+                        self.inventory.insert(entry, true);
                         entries_applied += 1;
                     }
                 }
                 ScanEvent::Entries(entries) => {
                     for entry in entries {
+                        self.inventory.insert(entry.clone(), false);
                         self.tree.insert(entry, false);
                         entries_applied += 1;
                     }
                 }
                 ScanEvent::DirectoryFinished(parent) => {
                     let stale = self
-                        .tree
+                        .inventory
                         .cached_by_parent
                         .remove(&parent)
                         .unwrap_or_default();
                     for path in stale {
+                        self.inventory.remove_subtree(&path);
                         self.tree.remove_subtree(&path);
                     }
                 }
@@ -300,6 +371,9 @@ impl StorageSession {
                 ScanEvent::Finished { cancelled, changed } => {
                     self.tree.finished = Some(cancelled);
                     self.tree.changed = changed;
+                    if !cancelled {
+                        self.last_completed = Some(std::time::SystemTime::now());
+                    }
                 }
             }
         }
@@ -308,8 +382,243 @@ impl StorageSession {
     pub fn tree(&self) -> &StorageTree {
         &self.tree
     }
+    pub fn inventory_count(&self) -> usize {
+        self.inventory.discovered_count()
+    }
     pub fn cancel(&self) {
-        self.scan.cancel();
+        if let Some(scan) = &self.scan {
+            scan.cancel();
+        }
+    }
+
+    pub fn last_completed(&self) -> Option<std::time::SystemTime> {
+        self.last_completed
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+}
+
+static NEXT_STORAGE_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Keeps each drive's latest tree alive independently of the Storage page and
+/// runs at most one filesystem refresh at a time.
+pub struct StorageManager {
+    drives: Vec<Drive>,
+    sessions: HashMap<PathBuf, StorageSession>,
+    next_drive: usize,
+    active: Option<PathBuf>,
+    next_cycle: std::time::Instant,
+    last_drive_check: std::time::Instant,
+    cache_receiver: Receiver<CacheLoadEvent>,
+    cache_worker: Option<JoinHandle<()>>,
+    cache_loading: bool,
+    started_at: std::time::Instant,
+}
+
+enum CacheLoadEvent {
+    Snapshot(PathBuf, Box<StorageTree>),
+    Entries(PathBuf, Vec<Entry>),
+    DriveFinished(PathBuf, Option<std::time::SystemTime>),
+    AllFinished,
+}
+
+impl StorageManager {
+    pub fn start(drives: Vec<Drive>) -> Self {
+        let started_at = std::time::Instant::now();
+        crate::config::log(&format!("Storage manager starting drives={}", drives.len()));
+        let (cache_sender, cache_receiver) = mpsc::sync_channel(2);
+        let cache_drives = drives.clone();
+        let cache_worker = thread::Builder::new()
+            .name("machineglass-storage-cache-load".into())
+            .spawn(move || {
+                set_storage_thread_low_priority();
+                let mut snapshot_roots = HashSet::new();
+                for drive in &cache_drives {
+                    let snapshot_path = treemap_path(drive);
+                    let snapshot_load_started = std::time::Instant::now();
+                    if let Some(tree) = load_treemap_snapshot(&snapshot_path, drive) {
+                        crate::config::log(&format!("Storage treemap snapshot loaded drive={} nodes={} bytes={} elapsed_ms={}", drive.label, tree.discovered_count(), fs::metadata(&snapshot_path).map(|m| m.len()).unwrap_or(0), snapshot_load_started.elapsed().as_millis()));
+                        if cache_sender.send(CacheLoadEvent::Snapshot(drive.root.clone(), Box::new(tree))).is_err() { return; }
+                        snapshot_roots.insert(drive.root.clone());
+                    }
+                }
+                for drive in cache_drives {
+                    let snapshot_path = treemap_path(&drive);
+                    let (path, entries, last_completed) = load_cache(&drive);
+                    if !snapshot_roots.contains(&drive.root) && !entries.is_empty() {
+                        let snapshot = build_render_tree(&drive, &entries);
+                        match save_treemap_snapshot(&snapshot_path, &drive, &snapshot) {
+                            Ok(()) => crate::config::log(&format!("Storage treemap snapshot created from inventory drive={} nodes={} bytes={} source={}", drive.label, snapshot.discovered_count(), fs::metadata(&snapshot_path).map(|m| m.len()).unwrap_or(0), path.display())),
+                            Err(error) => crate::config::log(&format!("Storage treemap snapshot save failed drive={} error={error}", drive.label)),
+                        }
+                        if cache_sender.send(CacheLoadEvent::Snapshot(drive.root.clone(), Box::new(snapshot))).is_err() { return; }
+                    }
+                    crate::config::log(&format!(
+                        "Storage cache decoded drive={} entries={}",
+                        drive.label,
+                        entries.len()
+                    ));
+                    for chunk in entries.chunks(256) {
+                        if cache_sender
+                            .send(CacheLoadEvent::Entries(drive.root.clone(), chunk.to_vec()))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if cache_sender
+                        .send(CacheLoadEvent::DriveFinished(
+                            drive.root.clone(),
+                            last_completed,
+                        ))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                let _ = cache_sender.send(CacheLoadEvent::AllFinished);
+            })
+            .ok();
+        let mut manager = Self {
+            sessions: drives
+                .iter()
+                .map(|drive| (drive.root.clone(), StorageSession::empty(drive)))
+                .collect(),
+            drives,
+            next_drive: 0,
+            active: None,
+            next_cycle: std::time::Instant::now() + std::time::Duration::from_secs(60 * 60),
+            last_drive_check: std::time::Instant::now(),
+            cache_receiver,
+            cache_worker,
+            cache_loading: true,
+            started_at,
+        };
+        if manager.cache_worker.is_none() {
+            manager.cache_loading = false;
+            manager.start_next();
+        }
+        manager
+    }
+
+    pub fn drives(&self) -> &[Drive] {
+        &self.drives
+    }
+
+    pub fn poll(&mut self) {
+        while let Ok(event) = self.cache_receiver.try_recv() {
+            match event {
+                CacheLoadEvent::Entries(root, entries) => {
+                    if let Some(session) = self.sessions.get_mut(&root) {
+                        session.apply_cached(entries);
+                    }
+                }
+                CacheLoadEvent::Snapshot(root, tree) => {
+                    if let Some(session) = self.sessions.get_mut(&root) {
+                        session.apply_snapshot(*tree);
+                    }
+                }
+                CacheLoadEvent::DriveFinished(root, last_completed) => {
+                    if let Some(session) = self.sessions.get_mut(&root) {
+                        session.last_completed = last_completed;
+                        crate::config::log(&format!(
+                            "Storage cache inventory published drive={} session_id={} inventory_entries={} render_snapshot_nodes={} cached_render_snapshot={} elapsed_ms={}",
+                            root.display(),
+                            session.id(),
+                            session.inventory_count(),
+                            session.tree().discovered_count(),
+                            session.tree().has_cached_snapshot(),
+                            self.started_at.elapsed().as_millis()
+                        ));
+                    }
+                }
+                CacheLoadEvent::AllFinished => {
+                    self.cache_loading = false;
+                    self.cache_worker = None;
+                }
+            }
+        }
+        if self.last_drive_check.elapsed() >= std::time::Duration::from_secs(60) {
+            self.refresh_drive_inventory();
+            self.last_drive_check = std::time::Instant::now();
+        }
+        if let Some(root) = self.active.clone() {
+            if let Some(session) = self.sessions.get_mut(&root) {
+                session.poll();
+                if !session.tree().is_scanning() {
+                    self.active = None;
+                    if self.next_drive >= self.drives.len() {
+                        self.next_cycle =
+                            std::time::Instant::now() + std::time::Duration::from_secs(60 * 60);
+                    }
+                }
+            } else {
+                self.active = None;
+            }
+        }
+        if !self.cache_loading
+            && self.active.is_none()
+            && (self.next_drive < self.drives.len() || std::time::Instant::now() >= self.next_cycle)
+        {
+            if self.next_drive >= self.drives.len() {
+                self.next_drive = 0;
+            }
+            self.start_next();
+        }
+    }
+
+    fn refresh_drive_inventory(&mut self) {
+        let discovered = local_drives();
+        let available: HashSet<_> = discovered.iter().map(|drive| drive.root.clone()).collect();
+        let known: HashSet<_> = self.drives.iter().map(|drive| drive.root.clone()).collect();
+        for drive in discovered {
+            if !known.contains(&drive.root) {
+                self.sessions
+                    .insert(drive.root.clone(), StorageSession::empty(&drive));
+                self.drives.push(drive);
+                self.next_cycle = std::time::Instant::now();
+            } else if let Some(existing) = self.drives.iter_mut().find(|old| old.root == drive.root)
+            {
+                *existing = drive;
+            }
+        }
+        self.drives.retain(|drive| available.contains(&drive.root));
+        self.next_drive = self.next_drive.min(self.drives.len());
+    }
+
+    fn start_next(&mut self) {
+        if self.next_drive < self.drives.len() {
+            let drive = self.drives[self.next_drive].clone();
+            self.next_drive += 1;
+            let root = drive.root.clone();
+            if let Some(session) = self.sessions.get_mut(&root) {
+                session.refresh(&drive);
+            } else {
+                self.sessions
+                    .insert(root.clone(), StorageSession::start(&drive));
+            }
+            self.active = Some(root);
+        } else {
+            self.next_cycle = std::time::Instant::now() + std::time::Duration::from_secs(60 * 60);
+        }
+    }
+
+    pub fn session(&self, root: &Path) -> Option<&StorageSession> {
+        self.sessions.get(root)
+    }
+
+    pub fn is_refreshing(&self, root: &Path) -> bool {
+        self.active.as_deref() == Some(root)
+    }
+
+    pub fn is_loading_cache(&self) -> bool {
+        self.cache_loading
+    }
+
+    pub fn elapsed_ms(&self) -> u128 {
+        self.started_at.elapsed().as_millis()
     }
 }
 
@@ -386,13 +695,315 @@ fn is_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn set_storage_thread_low_priority() {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_LOWEST,
+    };
+    let ok = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST) };
+    if ok == 0 {
+        crate::config::log(&format!(
+            "Could not lower storage worker priority: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+}
+
+#[cfg(not(windows))]
+fn set_storage_thread_low_priority() {}
+
 #[derive(Deserialize, Serialize)]
 struct StorageCache {
     version: u32,
     root: String,
     volume_id: Option<u32>,
     total_bytes: Option<u64>,
+    #[serde(default)]
+    completed_at_unix_secs: Option<u64>,
     entries: Vec<Entry>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TreemapSnapshot {
+    version: u32,
+    root: String,
+    volume_id: Option<u32>,
+    total_bytes: Option<u64>,
+    captured_at_unix_secs: u64,
+    nodes: Vec<TreemapNode>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TreemapNode {
+    parent: u32,
+    name: String,
+    directory: bool,
+    size: u64,
+    aggregate_count: u64,
+    aggregate: bool,
+}
+
+fn treemap_path(drive: &Drive) -> PathBuf {
+    treemap_path_for_cache(&cache_path(drive))
+}
+
+fn treemap_path_for_cache(path: &Path) -> PathBuf {
+    path.with_extension("treemap.json")
+}
+
+fn build_render_tree(drive: &Drive, entries: &[Entry]) -> StorageTree {
+    let mut children: HashMap<PathBuf, Vec<&Entry>> = HashMap::new();
+    for entry in entries {
+        if entry.path == drive.root && entry.parent == drive.root {
+            continue;
+        }
+        if entry.path != entry.parent {
+            children
+                .entry(entry.parent.clone())
+                .or_default()
+                .push(entry);
+        }
+    }
+    let mut directories: Vec<_> = entries.iter().filter(|entry| entry.is_dir).collect();
+    directories.sort_by_key(|entry| std::cmp::Reverse(entry.path.components().count()));
+    let mut directory_sizes = HashMap::with_capacity(directories.len());
+    for directory in directories {
+        let children_size = children
+            .get(&directory.path)
+            .into_iter()
+            .flatten()
+            .map(|child| {
+                if child.is_dir {
+                    directory_sizes
+                        .get(&child.path)
+                        .copied()
+                        .unwrap_or(child.size)
+                } else {
+                    child.size
+                }
+            })
+            .sum::<u64>();
+        directory_sizes.insert(directory.path.clone(), directory.size.max(children_size));
+    }
+    let mut tree = StorageTree {
+        total_bytes: drive.total_bytes,
+        free_bytes: drive.free_bytes,
+        render_prepared: true,
+        ..StorageTree::default()
+    };
+    if let Some(root_entry) = entries
+        .iter()
+        .find(|entry| entry.path == drive.root && entry.parent == drive.root)
+    {
+        let mut root_entry = root_entry.clone();
+        root_entry.size = directory_sizes
+            .get(&drive.root)
+            .copied()
+            .unwrap_or(root_entry.size);
+        tree.insert(root_entry, false);
+    }
+    let mut pending = vec![(drive.root.clone(), 0usize)];
+    while let Some((parent, depth)) = pending.pop() {
+        let Some(mut siblings) = children.remove(&parent) else {
+            continue;
+        };
+        siblings.sort_by(|a, b| {
+            directory_sizes
+                .get(&b.path)
+                .copied()
+                .unwrap_or(b.size)
+                .cmp(&directory_sizes.get(&a.path).copied().unwrap_or(a.size))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        let total_children = siblings.len();
+        let overflow_size = siblings
+            .iter()
+            .skip(79)
+            .map(|entry| {
+                directory_sizes
+                    .get(&entry.path)
+                    .copied()
+                    .unwrap_or(entry.size)
+            })
+            .sum::<u64>();
+        let overflow_count = total_children.saturating_sub(79);
+        siblings.truncate(79);
+        for entry in siblings {
+            let mut rendered = (*entry).clone();
+            rendered.size = directory_sizes
+                .get(&entry.path)
+                .copied()
+                .unwrap_or(entry.size);
+            tree.insert(rendered, false);
+            if entry.is_dir && depth < 8 {
+                pending.push((entry.path.clone(), depth + 1));
+            }
+        }
+        if overflow_count > 0 {
+            let entry = Entry {
+                path: parent.join(".machineglass-other-entries"),
+                parent: parent.clone(),
+                name: "Other discovered items".into(),
+                is_dir: false,
+                size: overflow_size,
+                aggregate_count: overflow_count as u64,
+                aggregate: true,
+                unmapped: false,
+            };
+            tree.insert(entry, false);
+        }
+    }
+    tree.cache_loaded = !tree.entries.is_empty();
+    tree
+}
+
+fn save_treemap_snapshot(path: &Path, drive: &Drive, tree: &StorageTree) -> std::io::Result<()> {
+    let mut ordered: Vec<_> = tree.entries.values().collect();
+    ordered.sort_by(|a, b| {
+        a.path
+            .components()
+            .count()
+            .cmp(&b.path.components().count())
+            .then_with(|| a.parent.cmp(&b.parent))
+            .then_with(|| b.size.cmp(&a.size))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    let indexes: HashMap<_, _> = ordered
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| (entry.path.as_path(), i as u32))
+        .collect();
+    let nodes = ordered
+        .iter()
+        .map(|entry| TreemapNode {
+            parent: if entry.path == drive.root {
+                u32::MAX
+            } else {
+                indexes
+                    .get(entry.parent.as_path())
+                    .copied()
+                    .unwrap_or(u32::MAX)
+            },
+            name: if entry.path == drive.root {
+                String::new()
+            } else {
+                entry.name.clone()
+            },
+            directory: entry.is_dir,
+            size: entry.size,
+            aggregate_count: entry.aggregate_count,
+            aggregate: entry.aggregate,
+        })
+        .collect();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let parent = path.parent().expect("treemap snapshot has parent");
+    fs::create_dir_all(parent)?;
+    let temp = path.with_extension(format!("treemap.json.{}.tmp", std::process::id()));
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temp)?;
+    let mut writer = BufWriter::new(file);
+    serde_json::to_writer(
+        &mut writer,
+        &TreemapSnapshot {
+            version: 3,
+            root: drive.label.clone(),
+            volume_id: drive.volume_id,
+            total_bytes: drive.total_bytes,
+            captured_at_unix_secs: timestamp,
+            nodes,
+        },
+    )
+    .map_err(std::io::Error::other)?;
+    writer.flush()?;
+    writer.get_ref().sync_all()?;
+    drop(writer);
+    replace_file(&temp, path)
+}
+
+fn load_treemap_snapshot(path: &Path, drive: &Drive) -> Option<StorageTree> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return None,
+    };
+    let snapshot: TreemapSnapshot = match serde_json::from_reader(BufReader::new(file)) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            crate::config::log(&format!(
+                "Storage treemap snapshot rejected drive={} reason=parse error: {error}",
+                drive.label
+            ));
+            return None;
+        }
+    };
+    if snapshot.version != 3
+        || snapshot.root != drive.label
+        || snapshot.volume_id != drive.volume_id
+    {
+        crate::config::log(&format!(
+            "Storage treemap snapshot rejected drive={} reason=identity mismatch version={} root={} volume_id={:?} expected_volume_id={:?}",
+            drive.label, snapshot.version, snapshot.root, snapshot.volume_id, drive.volume_id
+        ));
+        return None;
+    }
+    let node_count = snapshot.nodes.len();
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(node_count);
+    let mut tree = StorageTree {
+        total_bytes: snapshot.total_bytes,
+        render_prepared: true,
+        ..StorageTree::default()
+    };
+    for (index, node) in snapshot.nodes.into_iter().enumerate() {
+        let parent = if node.parent == u32::MAX {
+            drive.root.clone()
+        } else {
+            let Some(parent) = paths.get(node.parent as usize) else {
+                crate::config::log(&format!(
+                    "Storage treemap snapshot rejected drive={} reason=parent index {} is not before node {} nodes={}",
+                    drive.label, node.parent, index, node_count
+                ));
+                return None;
+            };
+            parent.clone()
+        };
+        let path = if node.parent == u32::MAX && node.name.is_empty() {
+            drive.root.clone()
+        } else if node.aggregate && node.name == "Other discovered items" {
+            parent.join(".machineglass-other-entries")
+        } else {
+            parent.join(&node.name)
+        };
+        let entry = Entry {
+            path: path.clone(),
+            parent,
+            name: node.name,
+            is_dir: node.directory,
+            size: node.size,
+            aggregate_count: node.aggregate_count,
+            aggregate: node.aggregate,
+            unmapped: false,
+        };
+        tree.insert(entry, false);
+        paths.push(path);
+        debug_assert!(index < u32::MAX as usize);
+    }
+    tree.cache_loaded = !tree.entries.is_empty();
+    Some(tree)
+}
+
+fn persist_render_snapshot(path: &Path, drive: &Drive, entries: &HashMap<PathBuf, Entry>) {
+    let tree = build_render_tree(drive, &entries.values().cloned().collect::<Vec<_>>());
+    if let Err(error) = save_treemap_snapshot(path, drive, &tree) {
+        crate::config::log(&format!(
+            "Storage treemap snapshot save failed drive={} error={error}",
+            drive.label
+        ));
+    }
 }
 
 fn cache_path(drive: &Drive) -> PathBuf {
@@ -407,17 +1018,31 @@ fn cache_path(drive: &Drive) -> PathBuf {
         .join(format!("{letter}.json"))
 }
 
-fn load_cache(drive: &Drive) -> (PathBuf, Vec<Entry>) {
+fn load_cache(drive: &Drive) -> (PathBuf, Vec<Entry>, Option<std::time::SystemTime>) {
+    let started = std::time::Instant::now();
     let path = cache_path(drive);
-    let (entries, outcome) = load_cache_file_diagnostic(&path, drive);
+    let (entries, outcome, last_completed) = load_cache_file_diagnostic(&path, drive);
+    let bytes = fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    if outcome.starts_with("hit") {
+        crate::config::log(&format!(
+            "Storage cache found and identity validated drive={} entries={} bytes={}",
+            drive.label,
+            entries.len(),
+            bytes
+        ));
+    }
     crate::config::log(&format!(
-        "Storage cache drive={} path={} outcome={} entries={}",
+        "Storage cache validation drive={} path={} bytes={} outcome={} entries={} elapsed_ms={}",
         drive.label,
         path.display(),
+        bytes,
         outcome,
-        entries.len()
+        entries.len(),
+        started.elapsed().as_millis()
     ));
-    (path, entries)
+    (path, entries, last_completed)
 }
 
 #[cfg(test)]
@@ -425,44 +1050,66 @@ fn load_cache_file(path: &Path, drive: &Drive) -> Vec<Entry> {
     load_cache_file_diagnostic(path, drive).0
 }
 
-fn load_cache_file_diagnostic(path: &Path, drive: &Drive) -> (Vec<Entry>, String) {
+fn load_cache_file_diagnostic(
+    path: &Path,
+    drive: &Drive,
+) -> (Vec<Entry>, String, Option<std::time::SystemTime>) {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return (Vec::new(), "not found".into());
+            return (Vec::new(), "not found".into(), None);
         }
-        Err(error) => return (Vec::new(), format!("open failed: {error}")),
+        Err(error) => return (Vec::new(), format!("open failed: {error}"), None),
     };
-    // Corrupt or unexpectedly large cache files are ignored; the live scan is
-    // still authoritative and will replace the cache when it completes.
-    if file
-        .metadata()
-        .map_or(true, |meta| meta.len() > 64 * 1024 * 1024)
-    {
-        return (Vec::new(), "metadata failed or cache exceeds 64 MiB".into());
-    }
+    let legacy_completion_time = file.metadata().ok().and_then(|meta| meta.modified().ok());
     let cache = match serde_json::from_reader::<_, StorageCache>(BufReader::new(file)) {
         Ok(cache) => cache,
-        Err(error) => return (Vec::new(), format!("invalid cache data: {error}")),
+        Err(error) => return (Vec::new(), format!("invalid cache data: {error}"), None),
     };
+    let root_matches = cache
+        .root
+        .eq_ignore_ascii_case(&drive.root.to_string_lossy());
     let identity_matches = cache.version == 1
         && drive.volume_id.is_some()
-        && cache.root.eq_ignore_ascii_case(&drive.label)
+        && root_matches
         && cache.volume_id == drive.volume_id
         && cache.total_bytes == drive.total_bytes;
     if identity_matches {
+        let valid_entries = cache.entries.iter().all(|entry| {
+            entry.path.starts_with(&drive.root)
+                && ((entry.path == drive.root
+                    && entry.parent == drive.root.parent().unwrap_or(&drive.root))
+                    || (entry.parent.starts_with(&drive.root)
+                        && entry.path.parent() == Some(entry.parent.as_path())))
+        });
+        if !valid_entries {
+            return (
+                Vec::new(),
+                "invalid cache paths (outside root or parent mismatch)".into(),
+                None,
+            );
+        }
         let count = cache.entries.len();
-        (cache.entries, format!("hit (identity matched, {count} entries)"))
+        let completed_at = cache
+            .completed_at_unix_secs
+            .map(|seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            .or(legacy_completion_time);
+        (
+            cache.entries,
+            format!("hit (identity matched, {count} entries)"),
+            completed_at,
+        )
     } else {
         (
             Vec::new(),
             format!(
                 "identity mismatch (version={}, root_match={}, volume_match={}, capacity_match={})",
                 cache.version == 1,
-                cache.root.eq_ignore_ascii_case(&drive.label),
+                root_matches,
                 drive.volume_id.is_some() && cache.volume_id == drive.volume_id,
                 cache.total_bytes == drive.total_bytes
             ),
+            None,
         )
     }
 }
@@ -477,7 +1124,12 @@ fn entries_fingerprint(entries: &[Entry]) -> u64 {
     hasher.finish()
 }
 
-fn save_cache(path: &Path, drive: &Drive, entries: HashMap<PathBuf, Entry>) -> std::io::Result<()> {
+fn save_cache(
+    path: &Path,
+    drive: &Drive,
+    entries: HashMap<PathBuf, Entry>,
+    completed_at: Option<std::time::SystemTime>,
+) -> std::io::Result<()> {
     let parent = path.parent().expect("storage cache has a parent");
     fs::create_dir_all(parent)?;
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
@@ -494,6 +1146,11 @@ fn save_cache(path: &Path, drive: &Drive, entries: HashMap<PathBuf, Entry>) -> s
             root: drive.label.clone(),
             volume_id: drive.volume_id,
             total_bytes: drive.total_bytes,
+            completed_at_unix_secs: completed_at.and_then(|time| {
+                time.duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|age| age.as_secs())
+            }),
             entries: entries.into_values().collect(),
         },
     )
@@ -610,15 +1267,24 @@ fn prune_cache_subtree(
     }
 }
 
-fn scan(
+struct ScanPlan {
     drive: Drive,
     cache_path: PathBuf,
     cached: Vec<Entry>,
+    cached_completed_at: Option<std::time::SystemTime>,
     cached_fingerprint: Option<u64>,
     started: std::time::Instant,
-    sender: SyncSender<ScanEvent>,
-    cancel: Arc<AtomicBool>,
-) {
+}
+
+fn scan(plan: ScanPlan, sender: SyncSender<ScanEvent>, cancel: Arc<AtomicBool>) {
+    let ScanPlan {
+        drive,
+        cache_path,
+        cached,
+        cached_completed_at,
+        cached_fingerprint,
+        started,
+    } = plan;
     let root = drive.root.clone();
     let mut cache_records: HashMap<PathBuf, Entry> = cached
         .into_iter()
@@ -648,6 +1314,7 @@ fn scan(
     let mut pending = vec![root.clone()];
     let mut work_since_flush = 0usize;
     let mut last_flush = std::time::Instant::now();
+    let mut last_checkpoint = std::time::Instant::now();
     let mut stopped = false;
     let mut issue_count = 0usize;
 
@@ -675,11 +1342,9 @@ fn scan(
                 continue;
             }
         };
-        directory_totals.entry(directory.clone()).or_insert_with(|| {
-            cache_records
-                .get(&directory)
-                .map_or(0, |entry| entry.size)
-        });
+        directory_totals
+            .entry(directory.clone())
+            .or_insert_with(|| cache_records.get(&directory).map_or(0, |entry| entry.size));
         let mut seen_children = HashSet::new();
         let mut directory_complete = true;
         for item in read_dir {
@@ -760,7 +1425,9 @@ fn scan(
             // partial sum of files encountered so far.
             let is_small_file_group = display_entry.aggregate;
             if !is_small_file_group {
-                let old_size = cache_records.get(&display_entry.path).map_or(0, |old| old.size);
+                let old_size = cache_records
+                    .get(&display_entry.path)
+                    .map_or(0, |old| old.size);
                 cache_records.insert(display_entry.path.clone(), display_entry.clone());
                 if !is_dir {
                     apply_directory_delta(
@@ -795,6 +1462,10 @@ fn scan(
                 }
                 work_since_flush = 0;
                 last_flush = std::time::Instant::now();
+                if last_checkpoint.elapsed() >= std::time::Duration::from_secs(5 * 60) {
+                    checkpoint_cache(&cache_path, &drive, &cache_records, cached_completed_at);
+                    last_checkpoint = std::time::Instant::now();
+                }
             }
         }
         if stopped {
@@ -888,21 +1559,31 @@ fn scan(
         })
     };
     let final_entry_count = cache_records.len();
-    if !cancelled {
-        match save_cache(&cache_path, &drive, cache_records) {
-            Ok(()) => crate::config::log(&format!(
-                "Storage cache saved drive={} entries={} path={}",
-                drive.label,
-                final_entry_count,
-                cache_path.display()
-            )),
-            Err(error) => crate::config::log(&format!(
-                "Storage cache save failed drive={} path={} error={error}",
-                drive.label,
-                cache_path.display()
-            )),
-        }
+    let completed_at = if cancelled {
+        cached_completed_at
+    } else {
+        Some(std::time::SystemTime::now())
+    };
+    match save_cache(&cache_path, &drive, cache_records.clone(), completed_at) {
+        Ok(()) => crate::config::log(&format!(
+            "Storage cache {} drive={} entries={} path={}",
+            if cancelled {
+                "interrupted progress saved"
+            } else {
+                "saved"
+            },
+            drive.label,
+            final_entry_count,
+            cache_path.display()
+        )),
+        Err(error) => crate::config::log(&format!(
+            "Storage cache save failed drive={} path={} error={error}",
+            drive.label,
+            cache_path.display()
+        )),
     }
+    let snapshot_path = treemap_path_for_cache(&cache_path);
+    persist_render_snapshot(&snapshot_path, &drive, &cache_records);
     crate::config::log(&format!(
         "Storage scan finished drive={} cancelled={} changed={changed:?} entries={} unreadable={} elapsed_ms={}",
         drive.label,
@@ -912,6 +1593,30 @@ fn scan(
         started.elapsed().as_millis()
     ));
     let _ = sender.send(ScanEvent::Finished { cancelled, changed });
+}
+
+fn checkpoint_cache(
+    path: &Path,
+    drive: &Drive,
+    records: &HashMap<PathBuf, Entry>,
+    completed_at: Option<std::time::SystemTime>,
+) {
+    match save_cache(path, drive, records.clone(), completed_at) {
+        Ok(()) => {
+            persist_render_snapshot(&treemap_path_for_cache(path), drive, records);
+            crate::config::log(&format!(
+                "Storage cache checkpoint drive={} entries={} path={}",
+                drive.label,
+                records.len(),
+                path.display()
+            ))
+        }
+        Err(error) => crate::config::log(&format!(
+            "Storage cache checkpoint failed drive={} path={} error={error}",
+            drive.label,
+            path.display()
+        )),
+    }
 }
 
 fn flush_batch(
@@ -931,6 +1636,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn render_snapshot_round_trips_prepared_top_children_and_aggregates_overflow() {
+        let temp = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("machineglass-treemap-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let drive = Drive {
+            root: PathBuf::from("F:\\"),
+            label: "F:\\".into(),
+            total_bytes: Some(10_000),
+            free_bytes: Some(1_000),
+            volume_id: Some(12),
+        };
+        let mut entries = vec![entry_for_directory(&drive.root, 5_050)];
+        for i in 0..100 {
+            let path = drive.root.join(format!("file-{i:03}.bin"));
+            entries.push(Entry {
+                parent: drive.root.clone(),
+                name: format!("file-{i:03}.bin"),
+                path,
+                is_dir: false,
+                size: 100 - i,
+                aggregate_count: 0,
+                aggregate: false,
+                unmapped: false,
+            });
+        }
+        let tree = build_render_tree(&drive, &entries);
+        assert!(tree.render_prepared());
+        assert_eq!(tree.children().get(&drive.root).unwrap().len(), 80);
+        assert!(
+            tree.entries()
+                .values()
+                .any(|entry| entry.name == "Other discovered items" && entry.aggregate_count == 21)
+        );
+        let path = temp.join("F.treemap.json");
+        save_treemap_snapshot(&path, &drive, &tree).unwrap();
+        let loaded = load_treemap_snapshot(&path, &drive).unwrap();
+        assert!(loaded.render_prepared());
+        assert_eq!(loaded.entry(&drive.root).unwrap().size, 5_050);
+        assert_eq!(loaded.children().get(&drive.root).unwrap().len(), 80);
+        assert_eq!(
+            loaded.entry(&drive.root.join("file-000.bin")).unwrap().size,
+            100
+        );
+        assert_eq!(
+            loaded
+                .entries()
+                .values()
+                .find(|entry| entry.name == "Other discovered items")
+                .unwrap()
+                .aggregate_count,
+            21
+        );
+        assert!(
+            load_treemap_snapshot(
+                &path,
+                &Drive {
+                    volume_id: Some(13),
+                    ..drive
+                }
+            )
+            .is_none()
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn render_snapshot_recovers_directory_totals_from_cached_children() {
+        let drive = Drive {
+            root: PathBuf::from("F:\\"),
+            label: "F:\\".into(),
+            total_bytes: Some(10_000),
+            free_bytes: Some(9_500),
+            volume_id: Some(12),
+        };
+        let directory = drive.root.join("SteamLibrary");
+        let file = directory.join("large.vhdx");
+        let entries = vec![
+            entry_for_directory(&drive.root, 0),
+            entry_for_directory(&directory, 0),
+            Entry {
+                path: file,
+                parent: directory.clone(),
+                name: "large.vhdx".into(),
+                is_dir: false,
+                size: 8_000,
+                aggregate_count: 0,
+                aggregate: false,
+                unmapped: false,
+            },
+        ];
+        let tree = build_render_tree(&drive, &entries);
+        assert_eq!(tree.entry(&directory).unwrap().size, 8_000);
+        assert_eq!(tree.entry(&drive.root).unwrap().size, 8_000);
+    }
+
+    #[test]
+    fn sidecar_path_follows_the_cache_path_not_the_drive_letter() {
+        let cache = PathBuf::from("target/test-cache.json");
+        assert_eq!(
+            treemap_path_for_cache(&cache),
+            PathBuf::from("target/test-cache.treemap.json")
+        );
+    }
+
+    #[test]
     fn scan_reports_top_level_before_descending_and_finishes() {
         let root =
             std::env::temp_dir().join(format!("machineglass-storage-{}", std::process::id()));
@@ -946,17 +1759,20 @@ mod tests {
             .unwrap();
         let (tx, rx) = mpsc::sync_channel(2048);
         scan(
-            Drive {
-                root: root.clone(),
-                label: root.display().to_string(),
-                total_bytes: Some(2_000_000),
-                free_bytes: Some(800_000),
-                volume_id: Some(1),
+            ScanPlan {
+                drive: Drive {
+                    root: root.clone(),
+                    label: root.display().to_string(),
+                    total_bytes: Some(2_000_000),
+                    free_bytes: Some(800_000),
+                    volume_id: Some(1),
+                },
+                cache_path: root.join("test-cache.json"),
+                cached: Vec::new(),
+                cached_completed_at: None,
+                cached_fingerprint: None,
+                started: std::time::Instant::now(),
             },
-            root.join("test-cache.json"),
-            Vec::new(),
-            None,
-            std::time::Instant::now(),
             tx,
             Arc::new(AtomicBool::new(false)),
         );
@@ -977,7 +1793,10 @@ mod tests {
         );
         assert!(matches!(
             events.last(),
-            Some(ScanEvent::Finished { cancelled: false, .. })
+            Some(ScanEvent::Finished {
+                cancelled: false,
+                ..
+            })
         ));
         fs::remove_dir_all(root).unwrap();
     }
@@ -989,23 +1808,29 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let cancelled = Arc::new(AtomicBool::new(true));
         scan(
-            Drive {
-                root: root.clone(),
-                label: root.display().to_string(),
-                total_bytes: None,
-                free_bytes: None,
-                volume_id: None,
+            ScanPlan {
+                drive: Drive {
+                    root: root.clone(),
+                    label: root.display().to_string(),
+                    total_bytes: None,
+                    free_bytes: None,
+                    volume_id: None,
+                },
+                cache_path: root.join("test-cache.json"),
+                cached: Vec::new(),
+                cached_completed_at: None,
+                cached_fingerprint: None,
+                started: std::time::Instant::now(),
             },
-            root.join("test-cache.json"),
-            Vec::new(),
-            None,
-            std::time::Instant::now(),
             tx,
             cancelled,
         );
         assert!(matches!(
             rx.try_iter().last(),
-            Some(ScanEvent::Finished { cancelled: true, .. })
+            Some(ScanEvent::Finished {
+                cancelled: true,
+                ..
+            })
         ));
         fs::remove_dir_all(root).unwrap();
     }
@@ -1073,9 +1898,11 @@ mod tests {
         let root_entry = entry_for_directory(&drive.root, 600);
         let mut entries = HashMap::new();
         entries.insert(root_entry.path.clone(), root_entry);
-        save_cache(&path, &drive, entries).unwrap();
+        save_cache(&path, &drive, entries, None).unwrap();
 
-        let cached = load_cache_file(&path, &drive);
+        let (cached, outcome, completed_at) = load_cache_file_diagnostic(&path, &drive);
+        assert!(outcome.starts_with("hit"));
+        assert!(completed_at.is_some(), "legacy cache mtime is retained");
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[0].size, 600);
         let other_volume = Drive {
@@ -1083,6 +1910,39 @@ mod tests {
             ..drive
         };
         assert!(load_cache_file(&path, &other_volume).is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cache_larger_than_64_mib_is_loaded_when_valid() {
+        let temp = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!("machineglass-large-cache-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp);
+        fs::create_dir_all(&temp).unwrap();
+        let path = temp.join("large.json");
+        let drive = Drive {
+            root: PathBuf::from("F:\\"),
+            label: "F:\\".into(),
+            total_bytes: Some(1000),
+            free_bytes: Some(400),
+            volume_id: Some(12),
+        };
+        let mut entries = HashMap::new();
+        let root_entry = entry_for_directory(&drive.root, 600);
+        entries.insert(root_entry.path.clone(), root_entry);
+        save_cache(&path, &drive, entries, None).unwrap();
+        {
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            let spaces = [b' '; 1024 * 1024];
+            for _ in 0..65 {
+                file.write_all(&spaces).unwrap();
+            }
+        }
+        assert!(fs::metadata(&path).unwrap().len() > 64 * 1024 * 1024);
+        let (cached, outcome, _) = load_cache_file_diagnostic(&path, &drive);
+        assert_eq!(cached.len(), 1, "cache outcome: {outcome}");
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -1107,19 +1967,25 @@ mod tests {
         let cache = std::env::current_dir()
             .unwrap()
             .join("target")
-            .join(format!("machineglass-repeat-cache-{}.json", std::process::id()));
+            .join(format!(
+                "machineglass-repeat-cache-{}.json",
+                std::process::id()
+            ));
         let (tx, rx) = mpsc::sync_channel(2048);
         scan(
-            drive.clone(),
-            cache.clone(),
-            Vec::new(),
-            None,
-            std::time::Instant::now(),
+            ScanPlan {
+                drive: drive.clone(),
+                cache_path: cache.clone(),
+                cached: Vec::new(),
+                cached_completed_at: None,
+                cached_fingerprint: None,
+                started: std::time::Instant::now(),
+            },
             tx,
             Arc::new(AtomicBool::new(false)),
         );
         let _first_events: Vec<_> = rx.try_iter().collect();
-        let (first, outcome) = load_cache_file_diagnostic(&cache, &drive);
+        let (first, outcome, _) = load_cache_file_diagnostic(&cache, &drive);
         assert!(!first.is_empty(), "initial scan cache outcome: {outcome}");
         let expected_bytes = 600_024;
         assert_eq!(
@@ -1130,11 +1996,14 @@ mod tests {
 
         let (tx, rx) = mpsc::sync_channel(2048);
         scan(
-            drive.clone(),
-            cache.clone(),
-            first,
-            Some(first_fingerprint),
-            std::time::Instant::now(),
+            ScanPlan {
+                drive: drive.clone(),
+                cache_path: cache.clone(),
+                cached: first,
+                cached_completed_at: None,
+                cached_fingerprint: Some(first_fingerprint),
+                started: std::time::Instant::now(),
+            },
             tx,
             Arc::new(AtomicBool::new(false)),
         );

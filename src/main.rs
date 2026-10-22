@@ -5,10 +5,10 @@ use machineglass::{
     config::{self, Config},
     engine::Engine,
     model::*,
-    storage::{self, Drive, Entry, StorageSession},
+    storage::{self, Entry, StorageManager},
     tray::{self, Tray},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -43,15 +43,16 @@ struct MachineGlass {
     descending: bool,
     selected: Option<ProcessIdentity>,
     capture: Option<PathBuf>,
+    capture_after_ms: Option<u64>,
     capture_requested: bool,
     quit_observed: bool,
     always_on_top: bool,
-    drives: Vec<Drive>,
+    storage_manager: StorageManager,
     drive_index: Option<usize>,
-    storage_session: Option<StorageSession>,
     storage_root: Option<PathBuf>,
     storage_selected: Option<PathBuf>,
     storage_hovered: Option<PathBuf>,
+    storage_cached_display_logged: HashSet<PathBuf>,
 }
 
 fn bytes(v: u64) -> String {
@@ -104,6 +105,7 @@ struct StorageDraw<'a> {
     hovered: Option<PathBuf>,
     selected: &'a mut Option<PathBuf>,
     capacity: Option<u64>,
+    prepared: bool,
 }
 
 impl StorageDraw<'_> {
@@ -131,13 +133,15 @@ impl StorageDraw<'_> {
         let total_discovered = children.iter().map(|entry| entry.size).sum::<u64>();
         let mut remainder_size = 0;
         let mut remainder_count = 0;
-        if children.len() > 79 {
+        if !self.prepared && children.len() > 79 {
             children.select_nth_unstable_by(79, |a, b| b.size.cmp(&a.size));
             remainder_size = children[79..].iter().map(|entry| entry.size).sum();
             remainder_count = children.len() - 79;
             children.truncate(79);
         }
-        children.sort_by_key(|entry| std::cmp::Reverse(entry.size));
+        if !self.prepared {
+            children.sort_by_key(|entry| std::cmp::Reverse(entry.size));
+        }
         let mut visible: Vec<Entry> = children.into_iter().cloned().collect();
         if remainder_count > 0 {
             visible.push(Entry {
@@ -346,6 +350,8 @@ impl MachineGlass {
         capture: Option<PathBuf>,
         page: Page,
         query: String,
+        storage_drive: Option<String>,
+        capture_after_ms: Option<u64>,
     ) -> Self {
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = Color32::from_rgb(16, 23, 32);
@@ -358,6 +364,16 @@ impl MachineGlass {
             s.spacing.button_padding = egui::vec2(14.0, 8.0);
         });
         let config = Config::load();
+        let drives = storage::local_drives();
+        let drive_index = storage_drive
+            .as_deref()
+            .and_then(|label| {
+                drives
+                    .iter()
+                    .position(|drive| drive.label.eq_ignore_ascii_case(label))
+            })
+            .unwrap_or(0);
+        let initial_root = drives.get(drive_index).map(|drive| drive.root.clone());
         config::log("Starting MachineGlass 0.1.0; direct Win32 provider");
         let tray = Tray::new(cc)
             .map_err(|e| {
@@ -376,26 +392,17 @@ impl MachineGlass {
             descending: true,
             selected: None,
             capture,
+            capture_after_ms,
             capture_requested: false,
             quit_observed: false,
             always_on_top: false,
-            drives: storage::local_drives(),
-            drive_index: None,
-            storage_session: None,
-            storage_root: None,
-            storage_selected: None,
+            storage_manager: StorageManager::start(drives),
+            drive_index: Some(drive_index),
+            storage_root: initial_root.clone(),
+            storage_selected: initial_root,
             storage_hovered: None,
+            storage_cached_display_logged: HashSet::new(),
         }
-    }
-
-    fn start_storage_scan(&mut self) {
-        let Some(drive) = self.drive_index.and_then(|i| self.drives.get(i)).cloned() else {
-            return;
-        };
-        self.storage_session = None; // Cancels the prior worker without blocking egui.
-        self.storage_root = Some(drive.root.clone());
-        self.storage_selected = Some(drive.root.clone());
-        self.storage_session = Some(StorageSession::start(&drive));
     }
 
     fn storage(&mut self, ui: &mut egui::Ui) {
@@ -406,13 +413,13 @@ impl MachineGlass {
             ui.label("Drive");
             let selected_text = self
                 .drive_index
-                .and_then(|i| self.drives.get(i))
+                .and_then(|i| self.storage_manager.drives().get(i))
                 .map(|d| d.label.as_str())
                 .unwrap_or("Select a local drive");
             egui::ComboBox::from_id_salt("storage_drive")
                 .selected_text(selected_text)
                 .show_ui(ui, |ui| {
-                    for (index, drive) in self.drives.iter().enumerate() {
+                    for (index, drive) in self.storage_manager.drives().iter().enumerate() {
                         if ui
                             .selectable_value(&mut self.drive_index, Some(index), &drive.label)
                             .clicked()
@@ -421,36 +428,59 @@ impl MachineGlass {
                         }
                     }
                 });
-            if self
-                .storage_session
-                .as_ref()
-                .is_some_and(|session| session.tree().is_scanning())
-                && ui.button("Cancel scan").clicked()
-                && let Some(scan) = &self.storage_session
-            {
-                scan.cancel();
+            if let Some(root) = &self.storage_root {
+                ui.label(if self.storage_manager.is_refreshing(root) {
+                    "Background refresh · active"
+                } else {
+                    "Background refresh · waiting"
+                });
             }
         });
-        if changed {
-            self.start_storage_scan();
+        if changed
+            && let Some(drive) = self
+                .drive_index
+                .and_then(|i| self.storage_manager.drives().get(i))
+        {
+            self.storage_root = Some(drive.root.clone());
+            self.storage_selected = Some(drive.root.clone());
+            if let Some(session) = self.storage_manager.session(&drive.root) {
+                config::log(&format!(
+                    "Storage UI selected drive={} session_id={} snapshot_nodes={} inventory_entries={} cached_render_snapshot={} refreshing={}",
+                    drive.label,
+                    session.id(),
+                    session.tree().discovered_count(),
+                    session.inventory_count(),
+                    session.tree().has_cached_snapshot(),
+                    self.storage_manager.is_refreshing(&drive.root)
+                ));
+            }
         }
-        if self.drives.is_empty() {
+        if self.storage_manager.drives().is_empty() {
             ui.colored_label(MUTED, "No fixed or removable local drives are available.");
             return;
         }
-        if self.storage_root.is_none() {
-            ui.label("Choose a drive to begin.");
+        let Some(root) = self.storage_root.clone() else {
+            ui.label("No drive selected.");
             return;
-        }
-        if let Some(session) = &mut self.storage_session {
-            session.poll();
-        }
-        let Some(session) = &self.storage_session else {
+        };
+        let Some(session) = self.storage_manager.session(&root) else {
+            ui.label("Loading the saved map for this drive…");
             return;
         };
         let tree = session.tree();
+        if tree.has_cached_snapshot() && self.storage_cached_display_logged.insert(root.clone()) {
+            config::log(&format!(
+                "Storage UI displaying persisted treemap drive={} session_id={} snapshot_nodes={} inventory_entries={} manager_elapsed_ms={} selected_path={} refreshing={}",
+                root.display(),
+                session.id(),
+                tree.discovered_count(),
+                session.inventory_count(),
+                self.storage_manager.elapsed_ms(),
+                self.storage_selected.as_deref().unwrap_or(&root).display(),
+                self.storage_manager.is_refreshing(&root)
+            ));
+        }
         let entries = tree.entries();
-        let root = self.storage_root.clone().unwrap_or_default();
         ui.horizontal_wrapped(|ui| {
             if let Some(selected) = &self.storage_selected {
                 if selected != &root && ui.button("← Parent").clicked() {
@@ -482,8 +512,12 @@ impl MachineGlass {
                     "Could not open storage location in Explorer: {error}"
                 ));
             }
-            let count = tree.discovered_count();
-            ui.label(format!("{count} discovered entries"));
+            let count = session.inventory_count();
+            if count == 0 && tree.has_cached_snapshot() {
+                ui.label("Inventory loading · saved map ready");
+            } else {
+                ui.label(format!("{count} inventory records"));
+            }
             if tree.inaccessible_count() > 0 {
                 let response = ui.label(format!("{} unreadable", tree.inaccessible_count()));
                 response.on_hover_ui(|ui| {
@@ -500,11 +534,17 @@ impl MachineGlass {
                     }
                 });
             }
-            if tree.is_scanning() {
+            if self.storage_manager.is_refreshing(&root) {
                 ui.label(if tree.has_cached_snapshot() {
                     "Cached map · verifying…"
                 } else {
                     "Scanning…"
+                });
+            } else if tree.finished().is_none() {
+                ui.label(if self.storage_manager.is_loading_cache() {
+                    "Saved map · loading other drive caches…"
+                } else {
+                    "Saved map · refresh queued"
                 });
             } else if let Some(error) = tree.error() {
                 ui.colored_label(Color32::YELLOW, format!("Scan could not start: {error}"));
@@ -542,6 +582,40 @@ impl MachineGlass {
                 String::new()
             }
         ));
+        let freshness = if self.storage_manager.is_loading_cache() && !tree.has_cached_snapshot() {
+            "Loading saved map"
+        } else if self.storage_manager.is_refreshing(&root) {
+            if tree.has_cached_snapshot() {
+                "Refreshing saved map"
+            } else {
+                "Building initial map"
+            }
+        } else if tree.has_cached_snapshot() {
+            "Saved map"
+        } else {
+            "Map unavailable"
+        };
+        let age = session.last_completed().map(|when| {
+            std::time::SystemTime::now()
+                .duration_since(when)
+                .unwrap_or_default()
+        });
+        let age_text = age.map_or_else(
+            || {
+                if tree.has_cached_snapshot() {
+                    "completion time unavailable (legacy cache)".to_owned()
+                } else {
+                    "no completed refresh yet".to_owned()
+                }
+            },
+            |age| {
+                format!(
+                    "last completed refresh {:.0} min ago",
+                    age.as_secs_f64() / 60.0
+                )
+            },
+        );
+        ui.label(format!("{freshness} · {age_text}"));
         let available = ui.available_size().max(egui::vec2(1.0, 1.0));
         let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
         let painter = ui.painter_at(rect);
@@ -579,6 +653,7 @@ impl MachineGlass {
                 hovered: None,
                 selected: &mut self.storage_selected,
                 capacity,
+                prepared: tree.render_prepared(),
             };
             drawing.draw(
                 ui,
@@ -1141,6 +1216,25 @@ impl eframe::App for MachineGlass {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.storage_manager.poll();
+        let selected_index = self.storage_root.as_ref().and_then(|root| {
+            self.storage_manager
+                .drives()
+                .iter()
+                .position(|drive| &drive.root == root)
+        });
+        if let Some(index) = selected_index {
+            self.drive_index = Some(index);
+        } else if let Some((index, drive)) = self.storage_manager.drives().iter().enumerate().next()
+        {
+            self.drive_index = Some(index);
+            self.storage_root = Some(drive.root.clone());
+            self.storage_selected = Some(drive.root.clone());
+        } else {
+            self.drive_index = None;
+            self.storage_root = None;
+            self.storage_selected = None;
+        }
         if !self.quit_observed && self.tray.as_ref().is_some_and(Tray::quitting) {
             self.quit_observed = true;
             config::log("UI observed tray Quit request");
@@ -1290,7 +1384,13 @@ impl eframe::App for MachineGlass {
             self.detail(ctx, s);
         }
         // Optional local UI verification: capture the actual native framebuffer.
-        if self.capture.is_some() && !self.capture_requested && history.len() >= 4 {
+        if self.capture.is_some()
+            && !self.capture_requested
+            && history.len() >= 4
+            && self
+                .capture_after_ms
+                .is_none_or(|ms| self.storage_manager.elapsed_ms() >= u128::from(ms))
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             self.capture_requested = true;
         }
@@ -1308,9 +1408,10 @@ impl eframe::App for MachineGlass {
         // Repainting only on samples/input; periodic check exposes a stalled provider.
         ctx.request_repaint_after(
             if self
-                .storage_session
-                .as_ref()
-                .is_some_and(|session| session.tree().is_scanning())
+                .storage_manager
+                .drives()
+                .iter()
+                .any(|drive| self.storage_manager.is_refreshing(&drive.root))
             {
                 Duration::from_millis(150)
             } else {
@@ -1370,6 +1471,14 @@ fn main() -> eframe::Result {
         .find(|w| w[0] == "--search")
         .map(|w| w[1].to_string_lossy().into_owned())
         .unwrap_or_default();
+    let storage_drive = args
+        .windows(2)
+        .find(|w| w[0] == "--storage-drive")
+        .map(|w| w[1].to_string_lossy().into_owned());
+    let capture_after_ms = args
+        .windows(2)
+        .find(|w| w[0] == "--capture-after-ms")
+        .and_then(|w| w[1].to_string_lossy().parse().ok());
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MachineGlass")
@@ -1382,7 +1491,16 @@ fn main() -> eframe::Result {
     let result = eframe::run_native(
         "MachineGlass",
         options,
-        Box::new(move |cc| Ok(Box::new(MachineGlass::new(cc, capture, page, query)))),
+        Box::new(move |cc| {
+            Ok(Box::new(MachineGlass::new(
+                cc,
+                capture,
+                page,
+                query,
+                storage_drive,
+                capture_after_ms,
+            )))
+        }),
     );
     if let Err(e) = &result {
         config::log(&format!("Native window failed: {e}"));

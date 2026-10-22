@@ -6,6 +6,195 @@ findings as well as features; distinguish a successful observation from a
 proven fix. Keep raw logs, inventory and captures local under `verification/`.
 Detailed measurement evidence belongs in [verification](VERIFICATION.md).
 
+## 22 October 2026 — Storage-map checkpoint validation
+
+Revalidated the pending persisted-map follow-up before synchronizing the
+checkpoint. Formatting, all 19 locked tests, all-target Clippy with warnings
+denied, and the optimized release build passed. Refreshed the authoritative
+`dist\\MachineGlass\\MachineGlass.exe` package; its SHA-256 matches the
+release binary at
+`BA85D588A3C383B1FEB1E3C357F36594EE2D8C8ED8A5FDBAECA0612DD11578DA`.
+
+Launched that packaged executable against the real user data directory and
+captured the native Storage page for F:. The displayed saved map contained
+116,298 inventory records and the expected `AI\\WSL\\Ubuntu-24.04\\ext4.vhdx`
+tile at 56.97 GiB. The screenshot is a local verification artifact under
+`target/` and is not tracked. The saved map rendered with refresh queued; this
+short acceptance run did not complete a new full-volume F: scan.
+
+## 17 October 2026 — Refresh shortcut executable
+
+The shortcut target at `dist\\MachineGlass\\MachineGlass.exe` was stale: its
+SHA-256 did not match the current optimized release. Rebuilt and packaged the
+current source into that exact portable folder. The shortcut executable now
+matches `target\\release\\MachineGlass.exe` at SHA-256
+`BA85D588A3C383B1FEB1E3C357F36594EE2D8C8ED8A5FDBAECA0612DD11578DA`.
+
+Launched the exact packaged path with the Storage page selected and the real
+user cache directory supplied explicitly (the verification sandbox redirects
+`LOCALAPPDATA` by default). The 944×720 native capture showed the complete
+saved C: treemap, “Cached map · verifying…”, and “Refreshing saved map” while
+the scan was active. The run ended after capture, before the five-minute
+checkpoint; the existing C: inventory and treemap sidecar retained their
+recorded file timestamps. Capture is kept outside Git. `cargo test --locked`
+(18 library and one layout test), all-target Clippy with warnings denied, and
+the locked release build passed. `cargo fmt --all` could not enumerate the
+workspace in this environment and returned Windows access denied.
+
+## 17 October 2026 — Cold-start cached Storage map verification
+
+Investigated the report that C: appeared to restart as an empty scan after a
+cold application restart. The real `%LOCALAPPDATA%` C.json was found and
+identity-validated (144,736,179 bytes, 391,065 entries). The manager published
+all 391,065 entries into drive session 1 and the Storage UI rendered that same
+session at 2.210 seconds after manager startup. Background refresh began only
+after all drive caches had been published, at about 5.262 seconds, and logged
+`existing_entries=391065 cached_snapshot=true` for the same session. Selecting
+D: and returning to C: during refresh retained session 1, all entries, and the
+visible C: treemap. D:, E:, F:, and G: were also selected in the native UI and
+each displayed its own cached session.
+
+The map was not replaced, cleared, or rebuilt from an empty scanner tree. The
+observed delay is the existing cache pipeline: C: is decoded in 644 ms, then
+its 391,065 entries are applied progressively to the UI model over about 2.2
+seconds. The scanner starts later and independently deserializes the cache
+again for scan reconciliation; that duplicate read remains unchanged for the
+separately requested memory investigation. Added concise lifecycle logs for
+cache validation/entry count, manager publication, refresh reuse, and UI
+display/selection, each correlated by per-drive session ID. The actual C.json
+SHA-256 and byte count matched before and after the cold run. No cache, map,
+refresh, or presentation behavior was changed; the evidence does not show a
+tree replacement bug requiring a functional fix.
+
+Validation: `cargo fmt`, 16 locked tests, Clippy with warnings denied, release
+build, actual cold launch against the user's caches, native C: display during
+active refresh, and native D:/E:/F:/G: selection followed by C: reselection
+during refresh. Native captures, raw logs, and cache samples remain outside
+Git. Detailed timings and limitations are in
+[verification](VERIFICATION.md).
+
+## 17 October 2026 — Persistent Storage cache benchmark
+
+Benchmarked the current JSON caches and refresh path before considering
+storage changes. All five real cache files were copied to a private staging
+directory and MachineGlass was launched with that directory as
+`LOCALAPPDATA`; the original files remained unchanged. Timings are from an
+optimized Windows release. Cache-load durations cover deserialize, validation
+and entry collection. “Map usable” is measured when the UI thread has applied
+all bounded-channel entry chunks for that drive. Startup memory was sampled
+every 125 ms; the single-instance refresh sample used one-second process
+memory, CPU and Windows process-I/O counters.
+
+| Drive | Cache bytes | Entries | Deserialize | Load/validate | Map usable since manager start |
+|---|---:|---:|---:|---:|---:|
+| C: | 144,736,179 | 391,065 | 524 ms | 666 ms | 2.248 s |
+| D: | 21,443,720 | 69,665 | 88 ms | 122 ms | 3.232 s |
+| E: | 713,465 | 2,846 | 2 ms | 10 ms | 3.257 s |
+| F: | 41,610,699 | 116,298 | 160 ms | 204 ms | 4.402 s |
+| G: | 26,761,811 | 86,261 | 95 ms | 130 ms | 5.241 s |
+| H: | no cache | 0 | — | 0 ms | 5.261 s |
+
+The five snapshots total 235,265,874 bytes and 666,135 entries. Process
+private/working memory before cache loading was 192.2/84.4 MiB. After each
+map became usable it measured: C: 716.1/593.9 MiB; D: 815.6/690.7 MiB; E:
+815.6/690.7 MiB; F: 977.8/854.1 MiB; G: 1,059.7/938.6 MiB. H: had no
+snapshot and did not materially change memory. The all-map increase over the
+pre-cache process was about 868 MiB private memory. The scanner then loaded C:
+again; the short startup sample reached 1,206 MiB private memory during that
+second load. During the separate five-minute refresh, steady private memory
+peaked at 1,407 MiB before checkpoint and at 1,433 MiB around checkpoint.
+One-second sampling observed about 26 MiB of additional private memory around
+the save; it may miss a shorter peak.
+
+The checkpoint cloned 391,065 records in 314 ms. The current streaming writer
+completed serialization plus buffered temporary-file writes in 417 ms, flush
+in under 1 ms, `sync_all` in 124 ms, and atomic replacement in 15 ms; total
+time from clone start through replacement was 874 ms. It wrote a 144,736,215
+byte staged C: cache. Because `serde_json::to_writer` streams into the
+`BufWriter`, serialization CPU and temporary-file writes are interleaved and
+cannot be separated in this path. A separate staged phase probe measured
+serialization to memory at 232 ms, writing the resulting 144,736,209-byte
+buffer at 121 ms, flush under 1 ms, sync at 10 ms, and replacement over an
+existing staged file at 14 ms. That probe allocated the serialized buffer; it
+is not the current streaming save implementation. Its process peaked at
+580,005,888 private bytes, including the parsed cache and 144.7 MB output
+buffer.
+
+The current scanner does deserialize a drive cache again after
+`StorageManager` has loaded it. `ScanHandle::start` receives only the `Drive`,
+then independently calls `load_cache` to create its cached entry vector and
+fingerprint for scan reconciliation. The manager’s already decoded entries
+are retained in its `StorageSession` and are not passed into the scanner. For
+C:, the second deserialize took 690 ms and the full scanner load/validation
+took 822 ms. This repeats per drive as each sequential scan begins; only C:
+was reached in this benchmark.
+
+During a single-instance refresh, MachineGlass process CPU averaged 16.6% of
+one logical core equivalent (95th percentile 24.6%, maximum 57.7%) over 294
+one-second samples. These are whole-process figures, including telemetry and
+UI work, not scanner-thread-only CPU. Process I/O counters recorded 362.4 MiB
+read across startup cache loading and the duplicate C: load, no additional
+read-transfer bytes after the first 12 seconds, and 138.0 MiB written by the
+checkpoint. Directory enumeration metadata is not represented by those byte
+counters. Windows `PhysicalDisk` performance counters were unavailable in
+this environment (`c0000bc8`), so physical-device throughput was not measured.
+An actual native frame captured during refresh showed the cached C: map,
+“Background refresh · active”, and a telemetry sample updated 0.2 seconds
+earlier; this establishes a responsive rendered frame, not input-latency
+coverage. The five-minute scan encountered access denial at
+`C:\Windows\WUModels` and did not complete a full-volume refresh.
+
+**Assessment:** JSON loading and checkpoint latency are sub-second per large
+C: cache and do not provide evidence for a compact persistent format. The
+resident tree is the larger cost: five maps added about 868 MiB private memory
+above the pre-cache process, and the process reached 1.43 GiB during refresh
+and checkpoint. A compact file format alone would not reduce that decoded
+tree. The smallest follow-up candidate is to investigate reusing the manager’s
+decoded snapshot in `ScanHandle`; the duplicate C: parse costs 690 ms and
+creates another cached entry vector. Measure its memory effect before
+implementing it. No cache format or architecture changes were made in this
+benchmark pass. Temporary source instrumentation and the helper probe were
+removed; staged copies, sample CSVs and screenshots remain outside Git.
+
+## 17 October 2026 — Persistent multi-drive Storage manager
+
+Storage now starts with MachineGlass rather than with the Storage page. A
+low-priority cache loader reads each local drive's existing JSON snapshot on a
+worker and publishes its entries into a per-drive `StorageSession`; after the
+cache pass, one low-priority filesystem scanner refreshes drives sequentially.
+The manager and maps stay alive while the page is closed, inventory is checked
+once per minute for removable-drive changes, and a completed drive cycle waits
+one hour before the next pass. Selecting a drive changes only the displayed
+model. The treemap remains visible while its saved entries are reconciled with
+the live filesystem.
+
+Removed the 64 MiB cache-size rejection. Cache loading now validates schema,
+volume serial, root, capacity, and every entry's path/parent relationship;
+corrupt and incompatible files retain a specific diagnostic. JSON remains the
+format. Checkpoints use the existing flushed temporary-file/atomic-replace
+path every five minutes during a scan and at scan exit, including interrupted
+progress. The cache records the last completed refresh time; older snapshots
+use their file modification time, matching the old save-after-completion
+behavior.
+
+**Verification:** On this machine the existing 144,736,179-byte C: cache
+loaded as a valid 391,065-entry snapshot. The existing D:, E:, F:, and G:
+snapshots also passed identity checks (69,665; 2,846; 116,298; and 86,261
+entries respectively). A release native capture showed the C: treemap
+immediately while its background refresh remained active. The refresh was
+allowed to run for 34 seconds; the full C: scan was not completed in this
+verification. A separate regression test loads valid JSON padded beyond 64
+MiB. `cargo fmt`, all 15 library tests plus the UI layout test, all-target
+Clippy with warnings denied, and the optimized Windows release build passed.
+Captures and staged private runtime cache copies were kept outside the repo.
+
+**Still open:** Full-volume completion timing and a complete changed-file
+reconciliation were not measured. Legacy cache timestamps are necessarily
+coarse file modification times. During the initial cycle the cache loader and
+the scanner each deserialize a drive's JSON snapshot on their own worker; this
+is correct but duplicates the initial parse. JSON parse and atomic checkpoint
+cost remain unbenchmarked for the full 145 MB snapshot.
+
 ## 14 October 2026 — Storage refresh diagnostics and stable cached sizing
 
 The user observed cached F: treemap boxes changing during a repeat scan despite
@@ -310,3 +499,74 @@ search/sort/details, bounded history and graphs, configuration, internal logs,
 and a portable release package. Verified actual native rendering and live
 measurements. This remains Milestone 1, not the full v1.0 product: GPU,
 storage, networking and flight-recorder features are still future work.
+
+## 17 October 2026 — Persisted render-ready Storage maps
+
+**Observed cause:** The `.json` file is a detailed inventory, not a render
+snapshot. Startup decoded it into 256-entry chunks and inserted them into the
+same `StorageTree` used by egui. Each frame laid out whatever partial hierarchy
+had arrived, rebuilding parent/child indexes as records arrived. The cache
+sequence comes from `HashMap::into_values()`, so it has no render order. The
+old “cached map displayed” log fired on the first nonempty partial tree; one
+cold run logged only 1,536 applied records at that point, despite the eventual
+391,065-record inventory. That was not evidence that the picture was ready.
+Refresh was not clearing the map; partial cache hydration was the visible
+rebuild.
+
+**Change:** Added a separate versioned `C.treemap.json` sidecar containing the
+renderer's retained hierarchy as parent-indexed nodes: names, directory/file /
+aggregate kinds, cumulative sizes and aggregate counts, plus drive root,
+volume identity, capacity and capture timestamp. It retains the renderer's
+largest 79 children per directory, one “Other discovered items” aggregate,
+and descendants through its eight-level render depth. No bitmap is stored and
+the detailed `.json` format is unchanged. The startup worker publishes all
+valid treemap sidecars before decoding any detailed inventory. `StorageSession`
+keeps the render tree and detailed inventory separate; cached inventory chunks
+only populate the inventory, while live scan events update the retained map.
+Checkpoint and final-save sidecars use the same cache path as their inventory.
+
+The F: inventory exposed directory entries whose stored cumulative sizes were
+zero even though cached children had nonzero sizes. Snapshot construction now
+recomputes directory totals bottom-up from the available cached children and
+keeps the larger of that sum and the cached total. This changes only the
+render-side model; it does not rewrite inventory records. UI count text now
+identifies inventory loading separately from a ready saved picture.
+
+**Real cold-start evidence:** Native 944×720 framebuffer captures for C:–G:
+showed the complete stored maps in the first rendered view. The manager logged
+C: snapshot load in 201 ms and “persisted treemap” display at 430 ms; D: 190 ms
+and 409 ms; E: 3 ms and 408 ms; F: 59 ms and 392 ms; G: 30 ms and 402 ms.
+Those display times are from StorageManager start, before detailed inventory
+loading. C: showed its familiar Users/Windows/Program Files/ProgramData and
+pagefile layout. F: showed SteamLibrary, AI and nested content after its saved
+child totals were applied. A separate C: capture after refresh began still
+showed the same complete map, with “Cached map · verifying…” and background
+refresh active. Private framebuffers are under the task's local verification
+folder and are not tracked.
+
+Final observed sidecars: C: 70,770 nodes / 7,703,968 bytes; D: 34,507 /
+3,993,466; E: 1,936 / 234,980; F: 27,101 / 2,900,571; G: 13,122 /
+1,459,107. C's sidecar is about 5.3% of its then-current 144,705,145-byte
+inventory file. On disk C: volume identity matched. The user-supplied baseline
+was 144,736,179 bytes / 391,065 entries; during this verification a leftover
+running verification instance checkpointed C.json, and the final valid cache
+became 144,705,145 bytes / 391,026 entries (SHA256
+`C42E486377FC8377093134B967E988307EB1B120CF99B6C15425E4798DB1AC21`). This
+checkpoint was not reverted. All verification-launched MachineGlass instances
+were stopped afterward.
+
+**Validation:** `cargo fmt`, full `cargo test --locked` (18 library tests and
+one native layout test), all-target Clippy with warnings denied, and the locked
+release build passed. One earlier full-test attempt hit MSVC `LNK1201` while
+writing the unrelated `collector-probe` PDB; the retry passed. Added regression
+coverage for compact snapshot round-trip/overflow, recovering
+cached directory totals, and keeping temporary scan sidecars beside their
+provided cache instead of writing under the real drive letter. The sidecar
+path test caught and fixed a test-isolation error before final captures.
+
+**Limits:** The cold-start check used the native `--storage-drive` selector to
+choose each real drive, not a mouse click. It verified each rendered map and a
+live C: refresh framebuffer, but is not a sustained responsiveness test. The
+renderer remains capped at its existing eight visible nesting levels; deeper
+drilldown can fill as live scanning proceeds. Duplicate scanner deserialization
+and memory optimization were not changed.
